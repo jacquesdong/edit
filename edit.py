@@ -16,7 +16,7 @@ find_editor() {
 
 editor="$(find_editor)"
 
-if [ $# -eq 0 ]; then
+if [ $# -gt 0 ]; then
 	exec $editor
 fi
 
