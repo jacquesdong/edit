@@ -4,7 +4,7 @@ set -e
 
 find_editor() {
 	local p
-	for i in vim vi emacs nano; do
+	for i in $VISUAL $EDITOR vim vi nano emacs; do
 		if p="$(which $i)" >/dev/null; then
 			echo "$p"
 			return 0
@@ -36,4 +36,4 @@ for i in "$@"; do
 	files="$files $i"
 done
 
-exec $editor $file
+exec $editor $files
