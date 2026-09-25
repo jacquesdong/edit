@@ -146,13 +146,13 @@ def find_remote_cli():
 
         cli = choose_cli_exe(d)
         if cli:
-            return cli
+            return [cli,]
 
 def find_path_cli():
     for i in CODE_LIKE:
         cli = shutil.which(i)
         if cli:
-            return cli
+            return [cli,]
 
 def find_env_cli():
     for i in ('VISUAL', 'EDITOR',):
@@ -160,12 +160,7 @@ def find_env_cli():
         if not v:
             continue
 
-        try:
-            name = shlex.split(v)[0]
-        except ValueError:
-            continue
-
-        cli = shutil.which(name)
+        cli = split_cmd(v)
         if cli:
             return cli
 
@@ -173,13 +168,13 @@ def find_fallback_cli():
     for i in VIM_LIKE:
         cli = shutil.which(i)
         if cli:
-            return cli
+            return [cli,]
 
 def find_user_cli():
-    """EDIT_CLI 显式指定，优先级最高，命令名或路径都行
+    """EDIT_CLI 显式指定，优先级最高，命令名或路径都行，可带参数
 
     多个 IDE 同时装着时（macOS 常见：code / buddycn / trae-cn 都在 PATH 里），
-    靠 CODE_LIKE 的顺序挑不出来，这时用它点名。
+    靠 CODE_LIKE 的顺序挑不出来，这时用它点名，例如 EDIT_CLI='code -n'。
 
     设了却解析不到就直接报错退出：显式配置不该被静默忽略。
     """
@@ -188,7 +183,7 @@ def find_user_cli():
     if not v:
         return None
 
-    cli = shutil.which(v)     # 带 / 的按路径找，否则搜 PATH
+    cli = split_cmd(v)        # 带 / 的按路径找，否则搜 PATH
     if not cli:
         sys.exit('edit: {}={} 找不到可执行文件'.format(EDIT_CLI, v))
 
@@ -206,9 +201,12 @@ def find_cli():
     如果能找到，就用它。
 
     4. 如果 PATH 里没有，就看看 VISUAL 和 EDITOR 环境变量，
-    如果有，就用它。
+    如果有，就用它（可带参数，如 EDITOR='vim -u NONE'）。
 
     5. 什么都没有，就按 VIM_LIKE 的顺序兜底（nvim / vim / vi）
+
+    返回 argv 列表 [cli, 附加参数...]，找不到返回 None：调用方直接把它拼在
+    用户参数前面交给 os.execv（os.execv 不查 PATH，所以第一个元素是绝对路径）。
     """
 
     finders = (
@@ -224,10 +222,43 @@ def find_cli():
         if cli:
             return cli
 
+def split_cmd(v):
+    """'vim -u NONE' -> ['/usr/bin/vim', '-u', 'NONE']；解析不到返回 None
+
+    第一个词经 which 解析成绝对路径（os.execv 不查 PATH），其余原样保留，
+    所以 $EDITOR / $VISUAL / $EDIT_CLI 都能带参数；引号交给 shlex.split，
+    路径含空格也没问题。自己配置里的参数不做 abspath，原样交给对方。
+
+    >>> split_cmd('true') == [shutil.which('true')]
+    True
+    >>> split_cmd('true -a "b c"') == [shutil.which('true'), '-a', 'b c']
+    True
+    >>> split_cmd('no-such-cmd-xyz -a') is None
+    True
+    >>> split_cmd('   ') is None
+    True
+    >>> split_cmd('true "unclosed') is None
+    True
+    """
+
+    try:
+        parts = shlex.split(v)
+    except ValueError:
+        return None
+
+    if not parts:
+        return None
+
+    cli = shutil.which(parts[0])
+    if not cli:
+        return None
+
+    return [cli,] + parts[1:]
+
 def cli_kind(cli):
     """判断 cli 属于哪一类，决定 file:行号 用哪种写法
 
-    find_cli() 返回的是绝对路径，所以比 basename，不能比 cli 本身。
+    参数是 cli 的绝对路径（find_cli()[0]），所以比 basename，不能比整条命令行。
     -g 只对 VS Code 系成立；对 vim 系还是有害的（vim -g 是启动 GUI）。
     不在 CLI_KIND 表里的返回 None，按"不认行号"处理：参数原样透传。
 
@@ -423,7 +454,7 @@ def print_init_script(shell):
     if not cli:
         sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CODE_LIKE)))
 
-    path = os.path.dirname(cli)
+    path = os.path.dirname(cli[0])
 
     # 值一律 shlex.quote：输出只含单引号段，bash / dash / fish 都认
     hook = shlex.quote(hook)
@@ -604,15 +635,16 @@ def main():
     if not cli:
         sys.exit('找不到 cli（%s）' % ' / '.join(CODE_LIKE + VIM_LIKE))
 
-    kind = cli_kind(cli)
-    argv = [cli,] + apply_goto(abspath_args(args, kind), kind)
+    # cli 是 argv 列表：[可执行文件, 自己配置里的参数...]（如 EDITOR='vim -u NONE'）
+    kind = cli_kind(cli[0])
+    argv = cli + apply_goto(abspath_args(args, kind), kind)
 
     if flags.dry_run:
         # 拼成可以直接复制执行的一行（bash/fish 都认）
         print(shlex.join(argv))
         return
 
-    os.execv(cli, argv)
+    os.execv(cli[0], argv)
 
 if __name__ == '__main__':
     # shell 的惯例：进程被信号 N 干掉，$? 报 128+N。
