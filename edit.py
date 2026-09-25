@@ -3,8 +3,14 @@
 
 """edit <文件...> —— 在当前 IDE 窗口打开文件
 
-只做一件事：把文件交给"当前这个终端所连接的那个 IDE 窗口"。
-不扫描 socket、不识别产品、没有子命令。
+用法：
+  edit <文件...>               在当前 IDE 窗口打开文件
+  edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
+  eval "$(edit --init bash)"   同上（bash / sh / dash）
+
+  注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
+  用空格拼成一条命令，必须用 | source 才能逐行执行。
+  另外 --init 要在集成终端里生成（那里才有 hook 和 remote-cli）。
 
 原理：在集成终端里 IDE 已经替你准备好两样东西
   * VSCODE_IPC_HOOK_CLI  指向本会话的窗口 socket
@@ -18,6 +24,7 @@
 
 from __future__ import print_function, unicode_literals
 
+import argparse
 import os
 import shlex
 import shutil
@@ -113,16 +120,55 @@ def find_cli():
         if cli:
             return cli
 
+def print_init_script(shell):
+    ipc = find_ipc_hook()
+    if not ipc:
+        sys.exit('edit --init: 当前终端没有 {}（请在 IDE 集成终端里生成）'.format(IPC_HOOK))
+
+    cli = find_remote_cli()
+    if not cli:
+        sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CLI_LIST)))
+
+    dir = os.path.dirname(cli)
+
+    # fish 下只能 `edit --init fish | source`
+    # fish 的 eval 会把多行输出用空格拼成一条命令
+    if shell == 'fish':
+        print('''
+set -gx {env} "{ipc}"
+if not contains "{dir}" $PATH
+    set -p PATH "{dir}"
+end
+'''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
+    else:
+        print('''
+export {env}="{ipc}"
+case ":$PATH:" in
+*:"{dir}":*) ;;
+*) export PATH="{dir}:$PATH" ;;
+esac
+'''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
+
+def build_args():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--init', choices=['fish', 'bash'])
+    return parser.parse_known_args()
+
 def main():
+    flags, args = build_args()
+    if flags.init:
+        if args:
+            sys.exit('edit --init 不接受文件参数')
+        print_init_script(flags.init)
+        return
+
     cli = find_cli()
     if not cli:
         # TODO: 错误信息只列 CLI_LIST，与现在含 $VISUAL/$EDITOR/vim 的链路不符，且几乎不可达
         sys.exit('找不到 cli（%s）' % ' / '.join(CLI_LIST))
 
-    args = [cli,]
-    args.extend(sys.argv[1:])
-    os.execv(cli, args)
-
+    argv = [cli,] + args
+    os.execv(cli, argv)
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
