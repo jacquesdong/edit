@@ -11,6 +11,7 @@
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
   edit --list                  列出存活的 IDE 窗口（socket / pid / remote-cli）
+  edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -546,6 +547,14 @@ def print_sockets():
               (mark, n, shlex.quote(s['sock']), s['pid'],
                os.path.basename(s['cli']) or '?', install))
 
+def print_usage():
+    """打印本文件开头的用法说明
+
+    --help 是透传给 IDE CLI 的（add_help=False），本程序自己的开关只能从这里查。
+    """
+
+    print(__doc__)
+
 def build_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
@@ -553,6 +562,7 @@ def build_args():
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--usage', action='store_true')
 
     flags, args = parser.parse_known_args()
 
@@ -560,6 +570,12 @@ def build_args():
 
 def main():
     flags, args = build_args()
+    if flags.usage:
+        if args:
+            sys.exit('edit --usage 不接受文件参数')
+        print_usage()
+        return
+
     if flags.init:
         if args:
             sys.exit('edit --init 不接受文件参数')
