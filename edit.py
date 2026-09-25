@@ -229,6 +229,15 @@ def cli_kind(cli):
     find_cli() 返回的是绝对路径，所以比 basename，不能比 cli 本身。
     -g 只对 VS Code 系成立；对 vim 系还是有害的（vim -g 是启动 GUI）。
     不在 CLI_KIND 表里的返回 None，按"不认行号"处理：参数原样透传。
+
+    >>> cli_kind('/opt/ide/bin/remote-cli/buddycn')
+    'code'
+    >>> cli_kind('/usr/bin/buddy')
+    'code'
+    >>> cli_kind('/usr/bin/vim')
+    'vim'
+    >>> cli_kind('/usr/bin/ed') is None
+    True
     """
 
     name = os.path.basename(cli)
@@ -237,6 +246,25 @@ def cli_kind(cli):
 
 def parse_goto(arg):
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
+
+    真实存在的文件优先（文件名里可以带冒号）；目录配行号没有意义。
+
+    >>> parse_goto('no-such-file.py:12')
+    ('no-such-file.py', '12', None)
+    >>> parse_goto('no-such-file.py:12:3')
+    ('no-such-file.py', '12', '3')
+    >>> parse_goto('no-such-file.py:abc') is None
+    True
+    >>> parse_goto('no-such-file.py:') is None
+    True
+    >>> parse_goto('/:12') is None              # 目录不算
+    True
+    >>> import tempfile
+    >>> f = os.path.join(tempfile.gettempdir(), 'edit-doctest:12')
+    >>> open(f, 'w').close()
+    >>> parse_goto(f) is None                   # 真实文件优先于 file:行号
+    True
+    >>> os.remove(f)
     """
 
     if os.path.exists(arg):
@@ -256,6 +284,17 @@ def goto_target(goto):
 
     存在的文件转成绝对路径：remote-cli 是把请求转给 server 的代理，
     相对路径未必按当前 shell 的 cwd 解释。
+
+    （例子用 realpath 而非 __file__：经 ~/.local/bin/edit 软链调用时
+    __file__ 就是软链路径，abspath 不会解开它）
+
+    >>> goto_target(('no-such-file.py', '12', None))
+    'no-such-file.py:12'
+    >>> goto_target(('no-such-file.py', '12', '3'))
+    'no-such-file.py:12:3'
+    >>> p = os.path.relpath(os.path.realpath(__file__))     # 相对路径，且真实存在
+    >>> goto_target((p, '12', None)) == os.path.realpath(__file__) + ':12'
+    True
     """
 
     file, line, col = goto
@@ -269,6 +308,18 @@ def goto_target(goto):
     return ':'.join((file, line, col))
 
 def has_goto(args):
+    """命令行里是否已经带了跳转选项（带了就不再改写）
+
+    >>> has_goto(['-g', 'no-such-file.py:12'])
+    True
+    >>> has_goto(['--goto', 'no-such-file.py:12'])
+    True
+    >>> has_goto(['--goto=no-such-file.py:12'])
+    True
+    >>> has_goto(['no-such-file.py:12'])
+    False
+    """
+
     for i in args:
         if i in ('-g', '--goto') or i.startswith('--goto='):
             return True
@@ -281,6 +332,15 @@ def abspath_args(args, kind):
     remote-cli 是把请求转给 server 的代理，相对路径未必按当前 shell 的 cwd 解释。
     vim/vi 这些本地编辑器按 cwd 解释就够了，保持相对路径更贴近手敲。
     只转存在的：不存在的没法与选项取值（如 --locale zh-cn）区分开。
+
+    >>> abspath_args(['no-such-file.py'], CLI_KIND_CODE)        # 不存在的原样
+    ['no-such-file.py']
+    >>> abspath_args(['--locale', 'zh-cn'], CLI_KIND_CODE)      # 选项取值不动
+    ['--locale', 'zh-cn']
+    >>> abspath_args([__file__], CLI_KIND_CODE) == [os.path.abspath(__file__)]
+    True
+    >>> abspath_args([__file__], CLI_KIND_VIM) == [__file__]    # vim 系保持相对
+    True
     """
 
     if kind != CLI_KIND_CODE:
@@ -295,6 +355,11 @@ def goto_args(goto, kind):
     vim ：+行号 放在文件之前。VIM_LIST 里这几个都认 +N；列号各家语法不同
           （vim 是 +call cursor(行,列)、nano 是 +行,列、emacs 是 +行:列），
           先只跳行号。
+
+    >>> goto_args(('no-such-file.py', '12', None), CLI_KIND_CODE)
+    ['--goto', 'no-such-file.py:12']
+    >>> goto_args(('no-such-file.py', '12', None), CLI_KIND_VIM)
+    ['+12', 'no-such-file.py']
     """
 
     file, line, col = goto
@@ -310,6 +375,19 @@ def apply_goto(args, kind):
     只有 code 与 vim 两类认识行号，其余（ed 等）原样透传。
     code 是就地成对插 --goto：它是带值的选项，必须紧邻目标，
     否则会把紧跟其后的选项当成自己的值（code --goto -r foo.py:12 是错的）。
+
+    >>> apply_goto(['no-such-file.py:12'], CLI_KIND_CODE)
+    ['--goto', 'no-such-file.py:12']
+    >>> apply_goto(['-r', 'no-such-file.py:12'], CLI_KIND_CODE)   # 就地成对
+    ['-r', '--goto', 'no-such-file.py:12']
+    >>> apply_goto(['-g', 'no-such-file.py:12'], CLI_KIND_CODE)   # 已有 -g 不重复加
+    ['-g', 'no-such-file.py:12']
+    >>> apply_goto(['--', 'no-such-file.py:12'], CLI_KIND_CODE)   # -- 之后按字面量
+    ['--', 'no-such-file.py:12']
+    >>> apply_goto(['no-such-file.py:12'], CLI_KIND_VIM)          # vim 用 +行号
+    ['+12', 'no-such-file.py']
+    >>> apply_goto(['no-such-file.py:12'], None)                  # 不认行号则原样
+    ['no-such-file.py:12']
     """
 
     if not kind or has_goto(args):
@@ -474,6 +552,7 @@ def build_args():
     parser.add_argument('--init', choices=['fish', 'bash'])
     parser.add_argument('--list', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--self-test', action='store_true')
 
     flags, args = parser.parse_known_args()
 
@@ -492,6 +571,18 @@ def main():
             sys.exit('edit --list 不接受文件参数')
         print_sockets()
         return
+
+    if flags.self_test:
+        if args:
+            sys.exit('edit --self-test 不接受文件参数')
+
+        import doctest            # 只在自检分支 import，不给正常路径加依赖
+
+        result = doctest.testmod()
+        print('edit --self-test: %d passed, %d failed' %
+              (result.attempted, result.failed))
+
+        return 1 if result.failed else 0
 
     cli = find_cli()
     if not cli:
