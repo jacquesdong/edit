@@ -10,6 +10,7 @@
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
+  edit --list                  列出存活的 IDE 窗口（socket / pid / remote-cli）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -61,8 +62,8 @@ CLI_KIND_VIM  = 'vim'
 
 for i in CODE_LIKE:
     CLI_KIND[i]   = CLI_KIND_CODE
-CLI_KIND["buddy"] = CLI_KIND_CODE
-CLI_KIND["trae"] = CLI_KIND_CODE
+CLI_KIND['buddy'] = CLI_KIND_CODE
+CLI_KIND['trae'] = CLI_KIND_CODE
 
 for i in VIM_LIKE:
     CLI_KIND[i] = CLI_KIND_VIM
@@ -72,42 +73,79 @@ CLI_KIND['emacs'] = CLI_KIND_VIM
 
 GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
-def find_ipc_hook():
+SOCK_PREFIX = 'vscode-ipc-'
+
+
+def get_ipc_hook():
     """取 VSCODE_IPC_HOOK_CLI 环境变量
     """
 
     return os.environ.get(IPC_HOOK)
 
 
+def choose_cli_exe(remote_cli_dir):
+    """在 <安装目录>/bin/remote-cli 里挑一个 CLI
+
+    同一个目录里通常只有一个产品的 CLI（code / buddycn / trae-cn…），
+    取排序后的第一个可执行文件，排序只为结果稳定。
+    返回完整路径；目录不存在或没有可执行文件时返回 None。
+    """
+
+    try:
+        names = sorted(os.listdir(remote_cli_dir))
+    except OSError:
+        return None
+
+    for name in names:
+        path = os.path.join(remote_cli_dir, name)
+
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    return None
+
 def find_remote_cli():
-    if not os.environ.get(IPC_HOOK):
+    """从 PATH 里找 server 端的 remote-cli：<安装目录>/bin/remote-cli/<产品>
+
+    它和 find_path_cli 分工不同：
+    * 这里按"目录名是 remote-cli"认，不看产品名 —— 能覆盖还没进 CODE_LIKE 的新产品
+    * find_path_cli 按已知产品名认（code / buddycn / …），两者互补
+
+    两个前置判断：
+    * 没有 VSCODE_IPC_HOOK_CLI 就不必找了 —— remote-cli 是 server 侧的代理，
+      缺 hook 时它自己会报 "Command is only available in WSL or inside a
+      Visual Studio Code terminal."，不如把机会让给 $VISUAL/$EDITOR/vim
+    * 只看目录结构，不管装在哪（家目录 / 系统目录 / 容器里都认）
+    """
+
+    hook = get_ipc_hook()
+    if not hook:
         return None
 
-    PATH = os.environ.get('PATH')
-    if not PATH:
+    path = os.environ.get('PATH')
+    if not path:
         return None
 
-    HOME = os.environ.get('HOME')
-    if not HOME:
-        return None
-
-    for d in PATH.split(os.pathsep):
+    for d in path.split(os.pathsep):
         if not d:
+            continue
+
+        # remote-cli 的上两级是 <安装目录>/bin/<版本>，那里必定有 node
+        # （包装脚本就是 exec "$ROOT/node" "$CLI_SCRIPT"）。用这个结构判断，
+        # 比 'server' in d 这类命名约定可靠，也顺带排除掉同名的无关目录。
+        if not os.access(os.path.join(d, os.pardir, os.pardir, 'node'), os.X_OK):
             continue
 
         d = d.rstrip(os.sep)
 
-        if not d.startswith(HOME):
-            continue
-
+        # 目录名 remote-cli 是唯一与产品无关的线索，剩下的交给 choose_cli_exe
         b = os.path.basename(d)
         if b != 'remote-cli':
             continue
 
-        for i in sorted(os.listdir(d)):
-            x = os.path.join(d, i)
-            if os.path.isfile(x) and os.access(x, os.X_OK):
-                return x
+        cli = choose_cli_exe(d)
+        if cli:
+            return cli
 
 def find_path_cli():
     for i in CODE_LIKE:
@@ -298,42 +336,143 @@ def apply_goto(args, kind):
     return out
 
 def print_init_script(shell):
-    ipc = find_ipc_hook()
-    if not ipc:
+    hook = get_ipc_hook()
+    if not hook:
         sys.exit('edit --init: 当前终端没有 {}（请在 IDE 集成终端里生成）'.format(IPC_HOOK))
 
     cli = find_remote_cli()
     if not cli:
         sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CODE_LIKE)))
 
-    dir = os.path.dirname(cli)
+    path = os.path.dirname(cli)
 
     # 值一律 shlex.quote：输出只含单引号段，bash / dash / fish 都认
-    ipc = shlex.quote(ipc)
-    dir = shlex.quote(dir)
+    hook = shlex.quote(hook)
+    path = shlex.quote(path)
 
     # fish 下只能 `edit --init fish | source`
     # fish 的 eval 会把多行输出用空格拼成一条命令
     if shell == 'fish':
         print('''
-set -gx {env} {ipc}
-if not contains {dir} $PATH
-    set -p PATH {dir}
+set -gx {env} {hook}
+if not contains {path} $PATH
+    set -p PATH {path}
 end
-'''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
+'''.format(env=IPC_HOOK, hook=hook, path=path))
     else:
         print('''
-export {env}={ipc}
+export {env}={hook}
 case ":$PATH:" in
-*:{dir}:*) ;;
-*) export PATH={dir}:"$PATH" ;;
+*:{path}:*) ;;
+*) export PATH={path}:"$PATH" ;;
 esac
-'''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
+'''.format(env=IPC_HOOK, hook=hook, path=path))
+
+def find_sockets():
+    """列出存活的 vscode-ipc socket 及其归属
+
+    只对 server 端有意义：桌面版（macOS 的 code / buddycn / trae-cn）根本不产生
+    这种 socket，CLI 自己会复用当前窗口，没有窗口可挑。
+    返回 [{'sock','pid','install','cli'}]；没有 /proc（macOS）时返回 None。
+    """
+
+    if not os.path.isdir('/proc'):
+        return None
+
+    # /proc/net/unix 只列已 bind 的 socket，天然把残留的 .sock 文件滤掉。
+    # 字段：Num(带冒号) RefCount Protocol Flags Type St Inode Path，即 Path 从第 8 个字段起。
+    # 用 Path 前面的那个 inode：它和 socket 文件的 st_ino 不是一个数。
+    #
+    # 只切 7 刀，让 Path 原样留在最后一个字段里：路径里可能带空格（XDG_RUNTIME_DIR
+    # 或 TMPDIR 指向带空格的目录时），用 line.split() 后取 p[-1] / p[7] 都会被截断——
+    # 好在 Path 是最后一列，切够 7 刀就不会误伤。
+    ino2sock = {}
+    try:
+        with open('/proc/net/unix') as f:
+            next(f)
+            for line in f:
+                # rstrip 只去行尾换行：split 带 maxsplit 时会把 \n 留在最后一个字段里
+                fields = line.rstrip('\n').split(None, 7)
+                if len(fields) < 8:
+                    continue  # 未 bind 的 socket 没有 Path
+                if SOCK_PREFIX not in fields[7]:
+                    continue
+                ino2sock[int(fields[6])] = fields[7]
+    except OSError:
+        return None
+
+    found = {}
+
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit():
+            continue
+
+        try:
+            fds = os.listdir('/proc/%s/fd' % pid)
+        except OSError:
+            continue                    # 别人的进程读不到，跳过
+
+        for fd in fds:
+            try:
+                link = os.readlink('/proc/%s/fd/%s' % (pid, fd))
+            except OSError:
+                continue
+
+            if not link.startswith('socket:['):
+                continue
+
+            sock = ino2sock.get(int(link[8:-1]))
+            if not sock:
+                continue
+
+            exe = os.path.realpath('/proc/%s/exe' % pid)
+            if not os.path.exists(exe):
+                continue  # 进程刚退出，exe 已悬空
+
+            install = os.path.dirname(exe)  # <安装目录>/node -> <安装目录>
+            cli = choose_cli_exe(os.path.join(install, 'bin', 'remote-cli'))
+
+            if sock in found and (found[sock]['cli'] or not cli):
+                continue  # 同一个 socket 被继承时留有用的那个
+
+            found[sock] = {
+                'sock': sock,
+                'pid': pid,
+                'install': install,
+                'cli': cli or '',
+            }
+
+    return [found[i] for i in sorted(found)]
+
+def print_sockets():
+    socks = find_sockets()
+
+    if socks is None:
+        sys.exit('edit --list: 这里没有窗口可挑（桌面版 CLI 自己会复用当前窗口，'
+                 '直接 edit <文件> 即可）')
+
+    if not socks:
+        sys.exit('edit --list: 没有存活的 IDE 窗口')
+
+    hook = get_ipc_hook()
+
+    # 打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI
+    print('  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'install'))
+
+    for n, s in enumerate(socks, 1):
+        mark = '*' if s['sock'] == hook else ' '
+        install = s['install']
+
+        # shlex.quote：路径含空格时整行还能直接粘回 shell；正常路径不加引号
+        print('%s %2d  %-67s %-8s %-9s %s' %
+              (mark, n, shlex.quote(s['sock']), s['pid'],
+               os.path.basename(s['cli']) or '?', install))
 
 def build_args():
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
     parser.add_argument('--init', choices=['fish', 'bash'])
+    parser.add_argument('--list', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
 
     flags, args = parser.parse_known_args()
@@ -346,6 +485,12 @@ def main():
         if args:
             sys.exit('edit --init 不接受文件参数')
         print_init_script(flags.init)
+        return
+
+    if flags.list:
+        if args:
+            sys.exit('edit --list 不接受文件参数')
+        print_sockets()
         return
 
     cli = find_cli()
@@ -363,4 +508,17 @@ def main():
     os.execv(cli, argv)
 
 if __name__ == '__main__':
-    sys.exit(main())
+    # shell 的惯例：进程被信号 N 干掉，$? 报 128+N。
+    # 130=INT(2) 131=QUIT(3)、137=KILL(9)、141=PIPE(13)、143=TERM(15)。
+    try:
+        status = main()
+        # 在 try 内落盘，否则小输出（<8KB）的 EPIPE 发生在退出阶段
+        sys.stdout.flush()
+        sys.exit(status)
+    except BrokenPipeError:
+        # print 写管道是缓冲的，EPIPE 多在解释器退出 flush 时才爆，
+        # 那时已出了 try 块。把 stdout 指向 devnull 让那次 flush 变空操作。
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(141)
+    except KeyboardInterrupt:
+        sys.exit(130)
