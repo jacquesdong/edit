@@ -5,12 +5,19 @@
 
 用法：
   edit <文件...>               在当前 IDE 窗口打开文件
+  edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
   edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
   另外 --init 要在集成终端里生成（那里才有 hook 和 remote-cli）。
+
+  行号只在位置参数上识别：以 - 开头的是选项，-- 之后按字面量原样交给 CLI。
+  真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
+  绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
+  vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
+  列号只有 VS Code 系用得上，vim 系先忽略。
 
 原理：在集成终端里 IDE 已经替你准备好两样东西
   * VSCODE_IPC_HOOK_CLI  指向本会话的窗口 socket
@@ -26,15 +33,16 @@ from __future__ import print_function, unicode_literals
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import sys
 
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
 CLI_LIST = ('code', 'buddycn', 'trae-cn', 'cursor',)
+VIM_LIST = ('nvim', 'vim', 'vi',)
 
-USAGE = '用法: edit <文件...>'
-
+GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
 def find_ipc_hook():
     """取 VSCODE_IPC_HOOK_CLI 环境变量
@@ -95,7 +103,7 @@ def find_env_cli():
             return cli
 
 def find_fallback_cli():
-    for i in ('vim', 'vi',):
+    for i in VIM_LIST:
         cli = shutil.which(i)
         if cli:
             return cli
@@ -112,13 +120,132 @@ def find_cli():
     3. 如果 PATH 里没有，就看看 VISUAL 和 EDITOR 环境变量，
     如果有，就用它。
 
-    4. 什么都没有，就 fallback 到 vim 或 vi
+    4. 什么都没有，就按 VIM_LIST 的顺序兜底（nvim / vim / vi）
     """
 
     for choice in (find_remote_cli, find_path_cli, find_env_cli, find_fallback_cli):
         cli = choice()
         if cli:
             return cli
+
+def cli_kind(cli):
+    """判断 cli 属于哪一类，决定 file:行号 用哪种写法
+
+    find_cli() 返回的是绝对路径，所以比 basename，不能比 cli 本身。
+    -g 只对 VS Code 系成立；对 vim 系还是有害的（vim -g 是启动 GUI）。
+    """
+
+    name = os.path.basename(cli)
+
+    if name in CLI_LIST:
+        return 'code'
+
+    if name in VIM_LIST:
+        return 'vim'
+    if name in ('nano', 'emacs',): # 支持 +行号 类似vim
+        return 'vim'
+
+    return 'unknown'
+
+def parse_goto(arg):
+    """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
+    """
+
+    if os.path.exists(arg):
+        return None         # 真实文件优先，文件名里可以带冒号
+
+    m = GOTO_RE.match(arg)
+    if not m:
+        return None
+
+    if os.path.isdir(m.group(1)):
+        return None         # 目录配行号没有意义
+
+    return m.group(1), m.group(2), m.group(3)
+
+def goto_target(goto):
+    """(文件, 行号, 列号) 拼回 --goto 的取值
+
+    存在的文件转成绝对路径：remote-cli 是把请求转给 server 的代理，
+    相对路径未必按当前 shell 的 cwd 解释。
+    """
+
+    file, line, col = goto
+
+    if os.path.exists(file):
+        file = os.path.abspath(file)
+
+    if not col:
+        return ':'.join((file, line))
+
+    return ':'.join((file, line, col))
+
+def has_goto(args):
+    for i in args:
+        if i in ('-g', '--goto') or i.startswith('--goto='):
+            return True
+
+    return False
+
+def abspath_args(args, kind):
+    """存在的路径参数转成绝对路径（只对 code 系）
+
+    remote-cli 是把请求转给 server 的代理，相对路径未必按当前 shell 的 cwd 解释。
+    vim/vi 这些本地编辑器按 cwd 解释就够了，保持相对路径更贴近手敲。
+    只转存在的：不存在的没法与选项取值（如 --locale zh-cn）区分开。
+    """
+
+    if kind != 'code':
+        return list(args)
+
+    return [os.path.abspath(a) if os.path.exists(a) else a for a in args]
+
+def goto_args(goto, kind):
+    """(文件, 行号, 列号) 转成该 CLI 认识的形式
+
+    code：--goto 文件:行号[:列]
+    vim ：+行号 放在文件之前。VIM_LIST 里这几个都认 +N；列号各家语法不同
+          （vim 是 +call cursor(行,列)、nano 是 +行,列、emacs 是 +行:列），
+          先只跳行号。
+    """
+
+    file, line, col = goto
+
+    if kind == 'code':
+        return ['--goto', goto_target(goto)]
+
+    return ['+' + line, file]
+
+def apply_goto(args, kind):
+    """把 file:行号 参数改写成对应 CLI 认识的形式
+
+    只有 code 与 vim 两类认识行号，其余（ed 等）原样透传。
+    code 是就地成对插 --goto：它是带值的选项，必须紧邻目标，
+    否则会把紧跟其后的选项当成自己的值（code --goto -r foo.py:12 是错的）。
+    """
+
+    if kind == 'unknown' or has_goto(args):
+        return list(args)
+
+    out = []
+
+    for i, a in enumerate(args):
+        if a == '--':
+            out.extend(args[i:])    # -- 之后是字面量，原样交给 CLI
+            break
+
+        if a.startswith('-'):
+            out.append(a)           # 选项原样透传
+            continue
+
+        goto = parse_goto(a)
+
+        if goto:
+            out.extend(goto_args(goto, kind))
+        else:
+            out.append(a)
+
+    return out
 
 def print_init_script(shell):
     ipc = find_ipc_hook()
@@ -131,28 +258,37 @@ def print_init_script(shell):
 
     dir = os.path.dirname(cli)
 
+    # 值一律 shlex.quote：输出只含单引号段，bash / dash / fish 都认
+    ipc = shlex.quote(ipc)
+    dir = shlex.quote(dir)
+
     # fish 下只能 `edit --init fish | source`
     # fish 的 eval 会把多行输出用空格拼成一条命令
     if shell == 'fish':
         print('''
-set -gx {env} "{ipc}"
-if not contains "{dir}" $PATH
-    set -p PATH "{dir}"
+set -gx {env} {ipc}
+if not contains {dir} $PATH
+    set -p PATH {dir}
 end
 '''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
     else:
         print('''
-export {env}="{ipc}"
+export {env}={ipc}
 case ":$PATH:" in
-*:"{dir}":*) ;;
-*) export PATH="{dir}:$PATH" ;;
+*:{dir}:*) ;;
+*) export PATH={dir}:"$PATH" ;;
 esac
 '''.format(env=IPC_HOOK, ipc=ipc, dir=dir))
 
 def build_args():
     parser = argparse.ArgumentParser(add_help=False)
+
     parser.add_argument('--init', choices=['fish', 'bash'])
-    return parser.parse_known_args()
+    parser.add_argument('--dry-run', action='store_true')
+
+    flags, args = parser.parse_known_args()
+
+    return flags, args
 
 def main():
     flags, args = build_args()
@@ -164,10 +300,16 @@ def main():
 
     cli = find_cli()
     if not cli:
-        # TODO: 错误信息只列 CLI_LIST，与现在含 $VISUAL/$EDITOR/vim 的链路不符，且几乎不可达
-        sys.exit('找不到 cli（%s）' % ' / '.join(CLI_LIST))
+        sys.exit('找不到 cli（%s）' % ' / '.join(CLI_LIST + VIM_LIST))
 
-    argv = [cli,] + args
+    kind = cli_kind(cli)
+    argv = [cli,] + apply_goto(abspath_args(args, kind), kind)
+
+    if flags.dry_run:
+        # 拼成可以直接复制执行的一行（bash/fish 都认）
+        print(shlex.join(argv))
+        return
+
     os.execv(cli, argv)
 
 if __name__ == '__main__':
