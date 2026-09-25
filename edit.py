@@ -9,9 +9,15 @@
   edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
+  EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
+
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
   另外 --init 要在集成终端里生成（那里才有 hook 和 remote-cli）。
+
+  两端机制不同：桌面版（macOS 的 code / buddycn / trae-cn）不需要任何 hook，
+  CLI 自己会复用当前窗口；server 端（<安装目录>/bin/remote-cli/*）必须有
+  VSCODE_IPC_HOOK_CLI，否则 CLI 直接拒绝执行，那种场景才需要 --init。
 
   行号只在位置参数上识别：以 - 开头的是选项，-- 之后按字面量原样交给 CLI。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
@@ -38,9 +44,31 @@ import shlex
 import shutil
 import sys
 
+EDIT_CLI = 'EDIT_CLI'
+
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
-CLI_LIST = ('code', 'buddycn', 'trae-cn', 'cursor',)
-VIM_LIST = ('nvim', 'vim', 'vi',)
+
+CODE_LIKE = ('code', 'buddycn', 'trae-cn', 'cursor',)
+VIM_LIKE = ('vim', 'nvim', 'vi',)
+
+# 命令行工具分类
+#
+# VS Code 系，使用 -g/--goto 跳转
+# vim 系, 使用 +行号 跳转
+CLI_KIND = {}
+CLI_KIND_CODE = 'code'
+CLI_KIND_VIM  = 'vim'
+
+for i in CODE_LIKE:
+    CLI_KIND[i]   = CLI_KIND_CODE
+CLI_KIND["buddy"] = CLI_KIND_CODE
+CLI_KIND["trae"] = CLI_KIND_CODE
+
+for i in VIM_LIKE:
+    CLI_KIND[i] = CLI_KIND_VIM
+# nano 和 emacs 都用 vim 的 +行号 跳转
+CLI_KIND['nano'] = CLI_KIND_VIM
+CLI_KIND['emacs'] = CLI_KIND_VIM
 
 GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
@@ -82,7 +110,7 @@ def find_remote_cli():
                 return x
 
 def find_path_cli():
-    for i in CLI_LIST:
+    for i in CODE_LIKE:
         cli = shutil.which(i)
         if cli:
             return cli
@@ -103,27 +131,56 @@ def find_env_cli():
             return cli
 
 def find_fallback_cli():
-    for i in VIM_LIST:
+    for i in VIM_LIKE:
         cli = shutil.which(i)
         if cli:
             return cli
 
+def find_user_cli():
+    """EDIT_CLI 显式指定，优先级最高，命令名或路径都行
+
+    多个 IDE 同时装着时（macOS 常见：code / buddycn / trae-cn 都在 PATH 里），
+    靠 CODE_LIKE 的顺序挑不出来，这时用它点名。
+
+    设了却解析不到就直接报错退出：显式配置不该被静默忽略。
+    """
+
+    v = os.environ.get(EDIT_CLI)
+    if not v:
+        return None
+
+    cli = shutil.which(v)     # 带 / 的按路径找，否则搜 PATH
+    if not cli:
+        sys.exit('edit: {}={} 找不到可执行文件'.format(EDIT_CLI, v))
+
+    return cli
+
 def find_cli():
     """取 命令行编辑工具
 
-    1. 终端里 PATH 通常就含 <安装目录>/bin/remote-cli，而且排在很前面，
+    1. EDIT_CLI 显式指定的。
+
+    2. 终端里 PATH 通常就含 <安装目录>/bin/remote-cli，而且排在很前面，
     如果这个目录下有可执行文件，就用它。
 
-    2. 如果 PATH 里没有，就看看 CLI_LIST 中的哪个命令行在 PATH 里，
+    3. 如果 PATH 里没有，就看看 CODE_LIKE 中的哪个命令行在 PATH 里，
     如果能找到，就用它。
 
-    3. 如果 PATH 里没有，就看看 VISUAL 和 EDITOR 环境变量，
+    4. 如果 PATH 里没有，就看看 VISUAL 和 EDITOR 环境变量，
     如果有，就用它。
 
-    4. 什么都没有，就按 VIM_LIST 的顺序兜底（nvim / vim / vi）
+    5. 什么都没有，就按 VIM_LIKE 的顺序兜底（nvim / vim / vi）
     """
 
-    for choice in (find_remote_cli, find_path_cli, find_env_cli, find_fallback_cli):
+    finders = (
+        find_user_cli,
+        find_remote_cli,
+        find_path_cli,
+        find_env_cli,
+        find_fallback_cli,
+    )
+
+    for choice in finders:
         cli = choice()
         if cli:
             return cli
@@ -133,19 +190,12 @@ def cli_kind(cli):
 
     find_cli() 返回的是绝对路径，所以比 basename，不能比 cli 本身。
     -g 只对 VS Code 系成立；对 vim 系还是有害的（vim -g 是启动 GUI）。
+    不在 CLI_KIND 表里的返回 None，按"不认行号"处理：参数原样透传。
     """
 
     name = os.path.basename(cli)
 
-    if name in CLI_LIST:
-        return 'code'
-
-    if name in VIM_LIST:
-        return 'vim'
-    if name in ('nano', 'emacs',): # 支持 +行号 类似vim
-        return 'vim'
-
-    return 'unknown'
+    return CLI_KIND.get(name)
 
 def parse_goto(arg):
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
@@ -195,7 +245,7 @@ def abspath_args(args, kind):
     只转存在的：不存在的没法与选项取值（如 --locale zh-cn）区分开。
     """
 
-    if kind != 'code':
+    if kind != CLI_KIND_CODE:
         return list(args)
 
     return [os.path.abspath(a) if os.path.exists(a) else a for a in args]
@@ -211,7 +261,7 @@ def goto_args(goto, kind):
 
     file, line, col = goto
 
-    if kind == 'code':
+    if kind == CLI_KIND_CODE:
         return ['--goto', goto_target(goto)]
 
     return ['+' + line, file]
@@ -224,7 +274,7 @@ def apply_goto(args, kind):
     否则会把紧跟其后的选项当成自己的值（code --goto -r foo.py:12 是错的）。
     """
 
-    if kind == 'unknown' or has_goto(args):
+    if not kind or has_goto(args):
         return list(args)
 
     out = []
@@ -254,7 +304,7 @@ def print_init_script(shell):
 
     cli = find_remote_cli()
     if not cli:
-        sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CLI_LIST)))
+        sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CODE_LIKE)))
 
     dir = os.path.dirname(cli)
 
@@ -300,7 +350,7 @@ def main():
 
     cli = find_cli()
     if not cli:
-        sys.exit('找不到 cli（%s）' % ' / '.join(CLI_LIST + VIM_LIST))
+        sys.exit('找不到 cli（%s）' % ' / '.join(CODE_LIKE + VIM_LIKE))
 
     kind = cli_kind(cli)
     argv = [cli,] + apply_goto(abspath_args(args, kind), kind)
