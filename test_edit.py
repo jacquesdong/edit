@@ -721,6 +721,73 @@ class ListTest(ProcCase):
         self.assertIn('不接受文件参数', code)
 
 
+class InteractiveOpenTest(ProcCase):
+    """--interactive <文件>：挑中的窗口直接开文件（不必先 --init 导入 hook）"""
+
+    def setUp(self):
+        super().setUp()
+        self.w1 = self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.w2 = self.add_window(path=self.sock2, body=status_body('/w/other'))
+
+    def opens(self, win):
+        """该窗口收到的 open 报文（探测 workspace 的 status 不算）"""
+
+        return [m for m in win.requests if m.get('type') == 'open']
+
+    def test_opens_in_chosen_window(self):
+        _, _, code = self.run_main('--interactive', self.a, answer='2')
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.opens(self.w1), [], '1 号不该被打开')
+        self.assertEqual(self.opens(self.w2)[-1]['fileURIs'], ['file://' + self.a])
+
+    def test_dry_run_shows_chosen_socket(self):
+        out, _, code = self.run_main('--dry-run', '--interactive', self.a, answer='2')
+
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith('socket %s ' % self.sock2), out)
+        self.assertEqual(self.opens(self.w1), [])
+        self.assertEqual(self.opens(self.w2), [], '--dry-run 不该真发')
+
+    def test_hook_is_written_back(self):
+        """挑完把 socket 写回 VSCODE_IPC_HOOK_CLI：后面的 current_socket() 都是它"""
+
+        seen = {}
+
+        def spy(sock, msg, **kw):
+            seen['sock'] = sock
+            seen['hook'] = os.environ.get(edit.IPC_HOOK)
+
+            return True, '{}'
+
+        with patch.object(edit, 'socket_open', spy):
+            _, _, code = self.run_main('--interactive', self.a, answer='2')
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen['sock'], self.sock2)
+        self.assertEqual(seen['hook'], self.sock2)
+
+    def test_enter_picks_current(self):
+        """有 hook 时回车 = 当前窗口"""
+
+        self.run_main('--interactive', self.a, hook=self.sock1, answer='')
+
+        self.assertEqual(self.opens(self.w1)[-1]['fileURIs'], ['file://' + self.a])
+        self.assertEqual(self.opens(self.w2), [])
+
+    def test_cancel(self):
+        _, _, code = self.run_main('--interactive', self.a, answer='q')
+
+        self.assertIn('没有选中窗口', code)
+        self.assertEqual(self.opens(self.w1), [])
+        self.assertEqual(self.opens(self.w2), [])
+
+    def test_conflicts_with_list(self):
+        _, _, code = self.run_main('--interactive', '--list', self.a)
+
+        self.assertIn('冲突', code)
+
+
 class InitTest(ProcCase):
     """--init：挑窗口 -> 只把该窗口的 hook 与 remote-cli 目录写进片段"""
 
@@ -752,10 +819,12 @@ class InitTest(ProcCase):
         self.assertIn('当前终端没有', code)
         self.assertEqual(out, '')
 
-    def test_interactive_needs_init(self):
+    def test_interactive_needs_files(self):
+        """不带 --init 又不给文件：挑了窗口也没东西可开"""
+
         _, _, code = self.run_main('--interactive')
 
-        self.assertIn('只和 --init 一起用', code)
+        self.assertIn('要带文件', code)
 
 
 if __name__ == '__main__':

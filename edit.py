@@ -16,6 +16,8 @@
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                    （普通终端里没有 hook 时用这个）
+  edit --interactive <文件...>     列出窗口并挑一个，在挑中的那个里打开文件
+                                   （普通终端里没有 hook、又想指定窗口时用这个）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -110,6 +112,23 @@ def current_socket():
     """
 
     return os.environ.get(IPC_HOOK)
+
+def redirect_socket(sock):
+    """把"当前窗口"重定向到 sock：之后 current_socket() 就返回它
+
+    和 current_socket() 成对，读写都收在这两个函数里。改的是环境变量而不是往
+    下传参，是因为回退到 CLI 时 os.execv 会把环境整个交给它 —— 挑中的窗口对
+    直连和 CLI 两条路都生效。目前只有 main 的 --interactive 用。
+
+    >>> saved = current_socket()
+    >>> redirect_socket('/x.sock') or current_socket()
+    '/x.sock'
+    >>> _ = redirect_socket(saved) if saved else os.environ.pop(IPC_HOOK, None)
+    >>> current_socket() == saved
+    True
+    """
+
+    os.environ[IPC_HOOK] = sock
 
 
 def choose_cli_exe(remote_cli_dir):
@@ -1068,7 +1087,7 @@ def format_sockets(socks, hook):
 def load_sockets(tag):
     """取候选并问出各自的 workspace；不适用 / 一个都没有时按 tag 报错退出
 
-    tag 形如 'edit --list'、'edit --init --interactive'，只用来拼错误信息。
+    tag 形如 'edit --list'、'edit --interactive'，只用来拼错误信息。
     返回的候选里带 authority / workspace（探测失败就是 None）。
     """
 
@@ -1138,6 +1157,9 @@ def ask_socket(socks):
     `edit --init fish --interactive | source` 才不会被提示语打断。
     有 hook 时（= 当前终端连着某个窗口）回车表示那个窗口；没有 hook 就没有
     当前窗口，只能输编号。q / EOF / 认不出的输入都算取消。
+
+    --init 之外也能挑（edit --interactive <文件>）：挑完由 main 把 socket
+    写回环境，之后打开文件就走那个窗口。
     """
 
     current = current_socket()
@@ -1191,8 +1213,22 @@ def main():
         print_usage()
         return
 
-    if flags.interactive and not flags.init:
-        sys.exit('edit --interactive: 现在只和 --init 一起用')
+    # --interactive：先挑窗口。挑完把 socket 写回环境，后面所有 current_socket()
+    # 就都指向它 —— 直连、--init 的默认值、以及回退时 CLI 继承的环境，全都跟着走，
+    # 那四个调用点一行都不用改
+    chosen = None
+
+    if flags.interactive:
+        if not flags.init and not args:
+            sys.exit('edit --interactive: 要带文件（挑完窗口就打开它）；'
+                     '只要初始化片段请用 edit --init <shell> --interactive')
+
+        if not flags.init and flags.list:
+            sys.exit('edit --interactive 和 edit --list 冲突'
+                     '（挑窗口时它自己会把窗口列出来）')
+
+        chosen = ask_socket(load_sockets('edit --interactive'))
+        redirect_socket(chosen['sock'])
 
     if flags.init:
         if args:
@@ -1201,17 +1237,17 @@ def main():
         if flags.list:
             sys.exit('edit --init 和 edit --list 冲突（挑窗口请用 --interactive）')
 
-        if flags.interactive:
+        if chosen:
             # 列出候选（stderr）挑一个，用它的 hook 和 CLI 目录输出片段
-            s = ask_socket(load_sockets('edit --init --interactive'))
             # cli 读不到时（别人的进程，权限不够）退回按安装目录推
-            cli_dir = os.path.dirname(s['cli']) or os.path.join(s['install'], 'bin', 'remote-cli')
+            cli_dir = (os.path.dirname(chosen['cli']) or
+                       os.path.join(chosen['install'], 'bin', 'remote-cli'))
 
             if not os.path.isdir(cli_dir):
                 # print_init_script 取不到值就静默不输出，所以这里先判一次
                 sys.exit('edit --init --interactive: {} 不是目录（换个窗口试试）'.format(cli_dir))
 
-            print_init_script(flags.init, s['sock'], cli_dir)
+            print_init_script(flags.init, chosen['sock'], cli_dir)
         else:
             hook = current_socket()
             if not hook:

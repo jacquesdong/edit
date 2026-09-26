@@ -104,9 +104,13 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   ├─ 参数能翻译成 open 报文 → 直连 socket（不找 CLI、不起 node）
   │     ├─ HTTP 200 → 结束；带 --wait 就再等窗口删 marker（见下）
   │     └─ 否则 stderr 提示 + 回退 CLI
-  └─ 翻不了（-g / 未知选项 / -- / 无参数 / --wait 但没给文件）或没有 socket
+  └─ 翻不了（未知选项 / -- / 无参数 / --wait 但没给文件）或没有 socket
         → 交给 remote-cli（code / buddycn / trae-cn，从 PATH 或 EDIT_CLI 找）
 ```
+
+带 `--interactive` 时先多一步：列出窗口让你挑，把挑中的 socket 写回
+`os.environ[IPC_HOOK]`，再走上面这张图 —— 所以"当前窗口"可以是挑出来的那个，
+且回退到 CLI 时它继承的也是同一个 hook（不用先 `--init` 导入）。
 
 ### `--wait` 是怎么等的
 
@@ -168,9 +172,10 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
    fixtures 的 `open-goto-short` / `open-goto-flag` 都是证据）。取值缺失或
    又是个选项时交回 CLI 让它报错。`--merge` 仍交回 CLI（fixtures 的
    `open-merge` 标着 `direct:false`），要接照抄即可。
-2. `--interactive` 选中的窗口**直接开文件**还没做：现在只有当前终端的 hook 走直连。
-   要支持"先挑窗口再开文件"，把选中的 socket 传下去，或在早期写回
-   `os.environ[IPC_HOOK]`（那样四个 `current_socket()` 调用点一行都不用改）。
+2. ~~`--interactive` 选中的窗口**直接开文件**~~ 已支持：`edit --interactive <文件>`
+   挑完窗口把 socket 早期写回 `os.environ[IPC_HOOK]`，四个 `current_socket()`
+   调用点一行没改 —— 直连、--init 的默认值、回退 CLI 继承的环境全都跟着走。
+   不带文件、与 `--list` 冲突、取消（q / EOF）都报错退出。
 3. 桌面版（macOS / Linux 桌面）其实也有 `vscode-ipc-*.sock`，只是被 `find_sockets()`
    的 node 判据过滤了。放宽判据即可复用同一条直连路径。
 4. ~~回归脚本还能补：`status` 探测、`--list` / `--init` 的输出~~ 已补：`PROC` 可注入
