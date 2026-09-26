@@ -88,6 +88,9 @@ GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
 SOCK_PREFIX = 'vscode-ipc-'
 
+# /proc 的根：find_sockets 全程只从这里读，测试可以把它指到假目录
+PROC = '/proc'
+
 
 def current_socket():
     """当前终端所连窗口的 socket（不在 IDE 终端里时 None）
@@ -511,7 +514,7 @@ def find_sockets():
     返回 [{'sock','pid','install','cli'}]；没有 /proc（macOS）时返回 None。
     """
 
-    if not os.path.isdir('/proc'):
+    if not os.path.isdir(PROC):
         return None
 
     # /proc/net/unix 只列已 bind 的 socket，天然把残留的 .sock 文件滤掉。
@@ -523,7 +526,7 @@ def find_sockets():
     # 好在 Path 是最后一列，切够 7 刀就不会误伤。
     ino2sock = {}
     try:
-        with open('/proc/net/unix') as f:
+        with open(os.path.join(PROC, 'net', 'unix')) as f:
             next(f)
             for line in f:
                 # rstrip 只去行尾换行：split 带 maxsplit 时会把 \n 留在最后一个字段里
@@ -538,18 +541,18 @@ def find_sockets():
 
     found = {}
 
-    for pid in os.listdir('/proc'):
+    for pid in os.listdir(PROC):
         if not pid.isdigit():
             continue
 
         try:
-            fds = os.listdir('/proc/%s/fd' % pid)
+            fds = os.listdir(os.path.join(PROC, pid, 'fd'))
         except OSError:
             continue                    # 别人的进程读不到，跳过
 
         for fd in fds:
             try:
-                link = os.readlink('/proc/%s/fd/%s' % (pid, fd))
+                link = os.readlink(os.path.join(PROC, pid, 'fd', fd))
             except OSError:
                 continue
 
@@ -560,7 +563,7 @@ def find_sockets():
             if not sock:
                 continue
 
-            exe = os.path.realpath('/proc/%s/exe' % pid)
+            exe = os.path.realpath(os.path.join(PROC, pid, 'exe'))
             if not os.path.exists(exe):
                 continue  # 进程刚退出，exe 已悬空
 

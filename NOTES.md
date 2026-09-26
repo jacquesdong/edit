@@ -96,6 +96,9 @@ subprocess.run([cli, '--goto', '/tmp/a.txt:3'], env=env, timeout=3)   # 会一�
 试过但**没采用**的两条路：
 
 - 持有 socket 的 server 进程的 `/proc/<pid>/cwd`：实测是 `$HOME` 或安装目录，没辨识价值；
+- `/proc` 走模块级 `PROC` 常量（默认是 `/proc`）：`test_edit.py` 的 `make_proc()` 照着
+  真表的结构造一份假的（`net/unix` + `<pid>/fd` 里的 `socket:[inode]` + `<pid>/exe`），
+  再把 `edit.PROC` 指过去，窗口发现就能确定性测到（不用真 IDE、不用真进程表）。
 - 扫 `/proc/*/environ` 找 `VSCODE_IPC_HOOK_CLI=<sock>` 的进程、看它们的 cwd：
   免费（5ms）且能区分窗口，但只给"该窗口里终端的目录"、要写去噪规则、也不好测，
   既然已经要直连 `status`，就不留这层。
@@ -109,7 +112,9 @@ subprocess.run([cli, '--goto', '/tmp/a.txt:3'], env=env, timeout=3)   # 会一�
    `os.environ[IPC_HOOK]`（那样四个 `current_socket()` 调用点一行都不用改）。
 3. 桌面版（macOS / Linux 桌面）其实也有 `vscode-ipc-*.sock`，只是被 `find_sockets()`
    的 node 判据过滤了。放宽判据即可复用同一条直连路径。
-4. 回归脚本还能补：`status` 探测、`--list` / `--init` 的输出（需要能注入假 `/proc`，暂缓）。
+4. ~~回归脚本还能补：`status` 探测、`--list` / `--init` 的输出~~ 已补：`PROC` 可注入
+   + `make_proc()` 造假进程表，见 `FindSocketsTest` / `ProbeTest` / `ListTest` /
+   `InitTest`（进程内跑 `main()`，`sys.argv` / `stdout` / `input` 都打补丁）。
 
 ## 历史是怎么来的
 

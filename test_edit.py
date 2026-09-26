@@ -5,6 +5,8 @@
 * socket 路径：起一个假窗口（AF_UNIX server），断言 edit 发过去的 JSON 与退出码
 * CLI 路径：EDIT_CLI 指到假 CLI，断言 --dry-run 打印的命令行、或它是否真被调用
 * 回退：假窗口回 500 / 连上就关，断言 stderr 有提示且假 CLI 真的被执行
+* 窗口发现：假 /proc（make_proc）+ 假窗口，测 find_sockets / status 探测 /
+  --list / --init；这些在进程内跑，靠 edit.PROC 指到假目录
 """
 
 import importlib.util
@@ -17,6 +19,9 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDIT = os.path.join(HERE, 'edit.py')
@@ -29,8 +34,9 @@ spec.loader.exec_module(edit)
 class FakeWindow:
     """假装是一个 IDE 窗口的 socket：收 POST，按设定回复"""
 
-    def __init__(self, code=200, body='{}', silent=False):
-        self.path = tempfile.mktemp(prefix='fake-window-', suffix='.sock')
+    def __init__(self, code=200, body='{}', silent=False, path=None):
+        # path 给定就绑在指定路径上：find_sockets 只认名字里带 vscode-ipc- 的 socket
+        self.path = path or tempfile.mktemp(prefix='fake-window-', suffix='.sock')
         self.code = code
         self.body = body
         self.silent = silent
@@ -120,15 +126,24 @@ class EditCase(unittest.TestCase):
         os.mkdir(self.spaced)
         self.spaced_file = self._touch(os.path.join('probe dir', 'a b.txt'))
 
+        self.wins = []
         self.win = None
         self.cli_out = os.path.join(self.dir, 'cli-args.txt')
         self.fake_cli = self._fake_cli()
 
     def tearDown(self):
-        if self.win:
-            self.win.close()
+        for w in self.wins:
+            w.close()
 
         self.tmp.cleanup()
+
+    def add_window(self, **kw):
+        """起一个假窗口并登记，tearDown 统一关"""
+
+        w = FakeWindow(**kw)
+        self.wins.append(w)
+
+        return w
 
     def _touch(self, name):
         path = os.path.join(self.dir, name)
@@ -165,7 +180,7 @@ class EditCase(unittest.TestCase):
     def open_msg(self, *args, **kw):
         """起假窗口，真发一次请求，返回窗口收到的报文"""
 
-        self.win = FakeWindow(**kw)
+        self.win = self.add_window(**kw)
         proc = self.run_edit(*args, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -254,7 +269,7 @@ class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""
 
     def test_socket_json(self):
-        self.win = FakeWindow()
+        self.win = self.add_window()
         proc = self.run_edit('--dry-run', self.a, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -268,7 +283,7 @@ class DryRunTest(EditCase):
         self.assertEqual(self.win.requests, [], '--dry-run 不该真的发请求')
 
     def test_cli_line(self):
-        self.win = FakeWindow()
+        self.win = self.add_window()
         proc = self.run_edit('--dry-run', '-g', self.a + ':3', hook=self.win.path)
 
         self.assertEqual(proc.stdout.split()[0], self.fake_cli)
@@ -285,12 +300,12 @@ class FallbackTest(EditCase):
         self.assertEqual(self.cli_args(), self.a)       # 假 CLI 真被调用了
 
     def test_http_500(self):
-        self.win = FakeWindow(code=500, body='boom')
+        self.win = self.add_window(code=500, body='boom')
 
         self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
 
     def test_window_closes(self):
-        self.win = FakeWindow(silent=True)
+        self.win = self.add_window(silent=True)
 
         self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
 
@@ -303,6 +318,240 @@ class FallbackTest(EditCase):
 
                 self.assertEqual(proc.returncode, 7, proc.stderr)
                 self.assertNotIn('socket 打不开', proc.stderr)
+
+
+def status_body(workspace, authority='ssh-remote+7'):
+    """假窗口答 status 时用的正文：JSON 字符串，里面含窗口自己的 argv
+
+    probe_workspaces 就是从这行 'Process Argv: --remote …' 里抠 workspace 的。
+    """
+
+    return json.dumps('Process Argv:     --remote %s %s' % (authority, workspace))
+
+
+def make_proc(root, windows):
+    """造一个最小 /proc，让 find_sockets 能在假目录上跑
+
+    windows: [(socket 路径, pid, 安装目录)]。安装目录里补上 node 与
+    bin/remote-cli/buddycn —— find_sockets 的判据就是这两样的结构，
+    所以假进程表只要结构对得上就够用了。
+    """
+
+    proc = os.path.join(root, 'proc')
+    os.makedirs(os.path.join(proc, 'net'))
+
+    lines = ['Num RefCount Protocol Flags Type St Inode Path']
+
+    for n, (sock, pid, install) in enumerate(windows, 1):
+        ino = 10000 + n
+        # 照真实 /proc/net/unix 的行写：Path 在最后一列，前面的 Inode 要和
+        # fd 里 socket:[inode] 对上
+        lines.append('%016x: 00000002 00000000 00010000 0001 01 %d %s' %
+                     (n, ino, sock))
+
+        fd_dir = os.path.join(proc, str(pid), 'fd')
+        os.makedirs(fd_dir)
+        os.symlink('socket:[%d]' % ino, os.path.join(fd_dir, '7'))
+
+        for path in (os.path.join(install, 'node'),
+                     os.path.join(install, 'bin', 'remote-cli', 'buddycn')):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+            with open(path, 'w'):
+                pass
+
+            os.chmod(path, 0o755)
+
+        os.symlink(os.path.join(install, 'node'), os.path.join(proc, str(pid), 'exe'))
+
+    with open(os.path.join(proc, 'net', 'unix'), 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+    return proc
+
+
+class ProcCase(EditCase):
+    """假 /proc + 假窗口：窗口发现、status 探测、--list / --init 的公共环境"""
+
+    def setUp(self):
+        super().setUp()
+        self.sock1 = os.path.join(self.dir, 'vscode-ipc-1.sock')
+        self.sock2 = os.path.join(self.dir, 'vscode-ipc-2.sock')
+        self.install = os.path.join(self.dir, 'ide')
+        self.cli_dir = os.path.join(self.install, 'bin', 'remote-cli')
+        self.proc = make_proc(self.dir, [(self.sock1, '101', self.install),
+                                         (self.sock2, '202', self.install)])
+
+    def candidates(self):
+        """用假 /proc 跑一次 find_sockets"""
+
+        with patch.object(edit, 'PROC', self.proc):
+            return edit.find_sockets()
+
+    def run_main(self, *argv, hook=None, answer=None):
+        """进程内跑 main：返回 (stdout, stderr, 退出码)
+
+        SystemExit 在这里接住（--init 报错、--interactive 取消都走它），
+        否则测试只能靠 subprocess 才能看到退出码。
+        """
+
+        out, err = StringIO(), StringIO()
+        env = dict(os.environ)
+        env.pop(edit.IPC_HOOK, None)
+
+        if hook is not None:
+            env[edit.IPC_HOOK] = hook
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, 'argv', ['edit.py', *argv]))
+            stack.enter_context(patch.object(edit, 'PROC', self.proc))
+            stack.enter_context(patch.dict(os.environ, env, clear=True))
+            stack.enter_context(patch('builtins.input', return_value=answer))
+            stack.enter_context(redirect_stdout(out))
+            stack.enter_context(redirect_stderr(err))
+
+            try:
+                edit.main()
+                code = 0
+            except SystemExit as e:
+                code = e.code
+
+        return out.getvalue(), err.getvalue(), code
+
+
+class FindSocketsTest(ProcCase):
+    """find_sockets：认 socket、推出安装目录与 CLI"""
+
+    def test_lists_windows(self):
+        found = self.candidates()
+
+        self.assertEqual([s['sock'] for s in found], [self.sock1, self.sock2])
+        self.assertEqual([s['pid'] for s in found], ['101', '202'])
+        self.assertEqual(found[0]['install'], self.install)
+        self.assertEqual(found[0]['cli'], os.path.join(self.cli_dir, 'buddycn'))
+
+    def test_ignores_other_sockets(self):
+        """名字里没有 vscode-ipc- 的一律不认"""
+
+        other = os.path.join(self.dir, 'other.sock')
+        proc = make_proc(os.path.join(self.dir, 'alt'),
+                         [(other, '303', self.install),
+                          (self.sock1, '101', self.install)])
+
+        with patch.object(edit, 'PROC', proc):
+            found = edit.find_sockets()
+
+        self.assertEqual([s['sock'] for s in found], [self.sock1])
+
+    def test_no_proc(self):
+        """没有 /proc（macOS）是 None，不是空列表：调用方靠它区分"不适用" """
+
+        with patch.object(edit, 'PROC', os.path.join(self.dir, 'no-such')):
+            self.assertIsNone(edit.find_sockets())
+
+    def test_no_net_unix(self):
+        """/proc 在但读不到 net/unix 也是 None"""
+
+        empty = os.path.join(self.dir, 'empty-proc')
+        os.makedirs(empty)
+
+        with patch.object(edit, 'PROC', empty):
+            self.assertIsNone(edit.find_sockets())
+
+
+class ProbeTest(ProcCase):
+    """status 探测：真给假窗口发一次请求，把 workspace 填回候选"""
+
+    def test_fills_workspace(self):
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.add_window(path=self.sock2, body=status_body('/w/other'))
+
+        socks = self.candidates()
+        edit.probe_workspaces(socks)
+
+        self.assertEqual([s['workspace'] for s in socks], ['/w/proj', '/w/other'])
+        self.assertEqual(socks[0]['authority'], 'ssh-remote+7')
+
+    def test_unreachable_is_none(self):
+        """连不上或答非所问 -> workspace 留 None（显示成 ?），不抛异常"""
+
+        self.add_window(path=self.sock1, body='{}')     # 不是 JSON 字符串
+
+        socks = self.candidates()                        # sock2 没人监听
+        edit.probe_workspaces(socks)
+
+        self.assertIsNone(socks[0]['workspace'])
+        self.assertIsNone(socks[1]['workspace'])
+
+
+class ListTest(ProcCase):
+    """--list：表格里要有 socket / cli / workspace，当前那个标 *"""
+
+    def test_list(self):
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, err, code = self.run_main('--list')
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, '')
+
+        rows = out.strip().split('\n')
+        self.assertEqual(len(rows), 3)                  # 表头 + 两个窗口
+        self.assertIn(self.sock1, rows[1])
+        self.assertIn('buddycn', rows[1])
+        self.assertIn('/w/proj', rows[1])
+        self.assertIn('?', rows[2])                      # 没人监听的那个
+
+    def test_marks_current(self):
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, _, _ = self.run_main('--list', hook=self.sock1)
+
+        rows = out.strip().split('\n')
+        self.assertTrue(rows[1].startswith('*'))
+        self.assertFalse(rows[2].startswith('*'))
+
+    def test_rejects_files(self):
+        _, _, code = self.run_main('--list', self.a)
+
+        self.assertIn('不接受文件参数', code)
+
+
+class InitTest(ProcCase):
+    """--init：挑窗口 -> 只把该窗口的 hook 与 remote-cli 目录写进片段"""
+
+    def test_interactive_picks_window(self):
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.add_window(path=self.sock2, body=status_body('/w/other'))
+
+        out, err, code = self.run_main('--init', 'bash', '--interactive', answer='2')
+
+        self.assertEqual(code, 0)
+        self.assertIn('export %s=%s' % (edit.IPC_HOOK, self.sock2), out)
+        self.assertIn(self.cli_dir, out)
+        self.assertNotIn(self.sock1, out)               # 挑的是 2 号
+        self.assertIn('选择窗口编号', err)               # 提示走 stderr
+
+    def test_interactive_cancel(self):
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, _, code = self.run_main('--init', 'fish', '--interactive', answer='q')
+
+        self.assertIn('没有选中窗口', code)
+        self.assertEqual(out, '')                       # 取消了就什么都不输出
+
+    def test_needs_hook(self):
+        """不带 --interactive 且当前终端没 hook：报错，不给片段"""
+
+        out, _, code = self.run_main('--init', 'bash')
+
+        self.assertIn('当前终端没有', code)
+        self.assertEqual(out, '')
+
+    def test_interactive_needs_init(self):
+        _, _, code = self.run_main('--interactive')
+
+        self.assertIn('只和 --init 一起用', code)
 
 
 if __name__ == '__main__':
