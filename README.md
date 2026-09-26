@@ -6,6 +6,8 @@
 （`config@61a4ff2` 的 `scripts/.scripts/edit.py`，含改名前 `bin/.bin/edit` 的 2020 年提交；
 3 条纯改名的提交因为内容未变没有重放）。dotfiles 里那份仍在，**由使用者手动同步**。
 
+背景、协议细节（怎么抓包、字段怎么映射）与待办见 [NOTES.md](NOTES.md)。
+
 ## 用法
 
 ```
