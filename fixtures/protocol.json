@@ -152,7 +152,31 @@
       "--goto",
       "/tmp/a.txt:3"
     ],
-    "direct": false,
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt:3"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": true,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-goto-short": {
+    "args": [
+      "-g",
+      "/tmp/a.txt:3"
+    ],
+    "direct": true,
     "msg": {
       "addMode": false,
       "diffMode": false,

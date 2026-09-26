@@ -48,6 +48,7 @@ Content-Length: 189
 | `edit a.txt` | `fileURIs:["file:///…/a.txt"]`、`gotoLineMode:false` |
 | `edit a.txt:3` | **行号拼在 URI 里**：`file:///…/a.txt:3`、`gotoLineMode:true` |
 | `edit a.txt:3:5` | `file:///…/a.txt:3:5`（列号可选） |
+| `edit -g a.txt:3` | 同上：取值原样拼进 URI 并置 `gotoLineMode:true`（直连，与 CLI 一致） |
 | `edit -r a.txt` | `forceReuseWindow:true` |
 | `edit -n a.txt` | `forceNewWindow:true` |
 | `edit -a a.txt` | `addMode:true` |
@@ -84,6 +85,7 @@ subprocess.run([cli, '--goto', '/tmp/a.txt:3'], env=env, timeout=3)   # 会一�
 ```bash
 python3 tools/capture_cli.py --name open-diff -- -d /tmp/a.txt /tmp/b.txt
 python3 tools/capture_cli.py --name open-goto --except gotoLineMode=true -- /tmp/a.txt:3
+python3 tools/capture_cli.py --name open-goto-short -- -g /tmp/a.txt:3
 ```
 
 它起假窗口、把 `VSCODE_IPC_HOOK_CLI` 指过去、跑一次 CLI，把报文脱敏后写进
@@ -161,8 +163,11 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 ## 还没做 / 待办
 
 1. ~~`--wait`~~ 已直连（见上：mkstemp marker + 等窗口删它，与 CLI 同机制）。
-   `--merge`、`-g` 还交回 CLI，要不要接看需求；报文已抓在 fixtures 里
-   （`open-merge` / `open-goto-flag`，标着 `direct:false`），接的时候照抄即可。
+   `-g` / `--goto` 也已直连：取值就是跳转目标，无条件按 `:行号[:列]` 拆
+   （`split_goto()`，不做"真实文件优先"那层判断 —— CLI 也是这么拆的，
+   fixtures 的 `open-goto-short` / `open-goto-flag` 都是证据）。取值缺失或
+   又是个选项时交回 CLI 让它报错。`--merge` 仍交回 CLI（fixtures 的
+   `open-merge` 标着 `direct:false`），要接照抄即可。
 2. `--interactive` 选中的窗口**直接开文件**还没做：现在只有当前终端的 hook 走直连。
    要支持"先挑窗口再开文件"，把选中的 socket 传下去，或在早期写回
    `os.environ[IPC_HOOK]`（那样四个 `current_socket()` 调用点一行都不用改）。

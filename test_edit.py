@@ -276,6 +276,53 @@ class SocketOpenTest(EditCase):
         self.assertEqual(msg['forceNewWindow'], False)
 
 
+class GotoTest(EditCase):
+    """-g / --goto：取值就是跳转目标（CLI 也是无条件按冒号拆，见 open-goto-short）"""
+
+    def test_forms(self):
+        """-g X / --goto X / --goto=X 三种写法等价，且 :3 不被转义成 %3A"""
+
+        want = ['file://' + self.a + ':3']
+
+        for args in (['-g', self.a + ':3'],
+                     ['--goto', self.a + ':3'],
+                     ['--goto=' + self.a + ':3']):
+            with self.subTest(args):
+                msg = edit.open_request(args)
+
+                self.assertEqual(msg['fileURIs'], want)
+                self.assertEqual(msg['gotoLineMode'], True)
+
+    def test_without_line(self):
+        """取值没有行号：只置 gotoLineMode，URI 不加冒号"""
+
+        msg = edit.open_request(['-g', self.a])
+
+        self.assertEqual(msg['fileURIs'], ['file://' + self.a])
+        self.assertEqual(msg['gotoLineMode'], True)
+
+    def test_missing_value_falls_back(self):
+        """-g 后面没取值、或取值又是个选项：交回 CLI 让它自己报错"""
+
+        for args in (['-g'], ['-g', '-r'], ['-r', '-g']):
+            with self.subTest(args):
+                self.assertIsNone(edit.open_request(args))
+
+    def test_mixes_with_flags(self):
+        msg = edit.open_request(['-r', '-g', self.a + ':3'])
+
+        self.assertEqual(msg['forceReuseWindow'], True)
+        self.assertEqual(msg['fileURIs'], ['file://' + self.a + ':3'])
+
+    def test_sent_to_window(self):
+        """端到端：真发给假窗口，不回退 CLI"""
+
+        msg = self.open_msg('-g', self.a + ':3')
+
+        self.assertEqual(msg['fileURIs'], ['file://' + self.a + ':3'])
+        self.assertEqual(msg['gotoLineMode'], True)
+
+
 class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""
 
@@ -293,13 +340,28 @@ class DryRunTest(EditCase):
         self.assertEqual(json.loads(payload)['fileURIs'], ['file://' + self.a])
         self.assertEqual(self.win.requests, [], '--dry-run 不该真的发请求')
 
-    def test_cli_line(self):
+    def test_goto_is_direct(self):
+        """-g 现在能直连：--dry-run 打的是报文，不是命令行"""
+
         self.win = self.add_window()
         proc = self.run_edit('--dry-run', '-g', self.a + ':3', hook=self.win.path)
 
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        head, _, rest = proc.stdout.strip().partition(' ')
+        self.assertEqual(head, 'socket')
+
+        payload = json.loads(rest.partition(' ')[2])
+        self.assertEqual(payload['fileURIs'], ['file://' + self.a + ':3'])
+        self.assertEqual(payload['gotoLineMode'], True)
+        self.assertEqual(self.win.requests, [])
+
+    def test_cli_line(self):
+        """没有 socket 时 -g 原样交给 CLI（apply_goto 也不会再插一个）"""
+
+        proc = self.run_edit('--dry-run', '-g', self.a + ':3')
+
         self.assertEqual(proc.stdout.split()[0], self.fake_cli)
         self.assertEqual(proc.stdout.split()[1:3], ['-g', self.a + ':3'])
-        self.assertEqual(self.win.requests, [])
 
 
 class FallbackTest(EditCase):
@@ -321,9 +383,10 @@ class FallbackTest(EditCase):
         self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
 
     def test_untranslatable_args(self):
-        """--wait / -g / 无参数 / 没有 socket：一律交给 CLI"""
+        """--wait / --merge / 无参数 / 没有 socket：一律交给 CLI"""
 
-        for args in (['--wait', self.a], ['-g', self.a + ':3'], []):
+        for args in (['--wait', self.a],
+                     ['--merge', self.a, self.b, self.a, self.b], []):
             with self.subTest(args):
                 proc = self.run_edit(*args)
 
@@ -596,11 +659,11 @@ class WaitTest(EditCase):
         before = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*')))
 
         self.win = self.add_window()
-        proc = self.run_edit('--wait', '-g', self.a, hook=self.win.path)
+        proc = self.run_edit('--wait', '--merge', self.a, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 被调起
         # --wait 原样交回 CLI（它自己会造 marker 并等），我们造的那个已经收回
-        self.assertEqual(self.cli_args(), '--wait -g ' + self.a)
+        self.assertEqual(self.cli_args(), '--wait --merge ' + self.a)
 
         left = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*'))) - before
         self.assertEqual(left, set(), 'marker 该被收回去')

@@ -25,7 +25,8 @@
   CLI 自己会复用当前窗口；server 端（<安装目录>/bin/remote-cli/*）必须有
   VSCODE_IPC_HOOK_CLI，否则 CLI 直接拒绝执行，那种场景才需要 --init。
 
-  行号只在位置参数上识别：以 - 开头的是选项，-- 之后按字面量原样交给 CLI。
+  行号认两种写法：位置参数 文件:行号，以及 -g / --goto 的取值。
+  此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
@@ -302,6 +303,34 @@ def cli_kind(cli):
 
     return CLI_KIND.get(name)
 
+def split_goto(arg):
+    """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
+
+    和 parse_goto 的差别：不做"真实文件优先"的判断。给 -g / --goto 用 ——
+    它的取值明摆着是跳转目标，CLI 也是无条件按冒号拆的（fixtures 的
+    open-goto-flag 里 /tmp/a.txt 是存在的，URI 照样是 file:///tmp/a.txt:3）。
+
+    >>> split_goto('no-such-file.py:12')
+    ('no-such-file.py', '12', None)
+    >>> split_goto('no-such-file.py:12:3')
+    ('no-such-file.py', '12', '3')
+    >>> split_goto('no-such-file.py:abc') is None
+    True
+    >>> split_goto('no-such-file.py:') is None
+    True
+    >>> split_goto('/:12') is None                  # 目录不算
+    True
+    """
+
+    m = GOTO_RE.match(arg)
+    if not m:
+        return None
+
+    if os.path.isdir(m.group(1)):
+        return None         # 目录配行号没有意义
+
+    return m.group(1), m.group(2), m.group(3)
+
 def parse_goto(arg):
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
@@ -328,14 +357,7 @@ def parse_goto(arg):
     if os.path.exists(arg):
         return None         # 真实文件优先，文件名里可以带冒号
 
-    m = GOTO_RE.match(arg)
-    if not m:
-        return None
-
-    if os.path.isdir(m.group(1)):
-        return None         # 目录配行号没有意义
-
-    return m.group(1), m.group(2), m.group(3)
+    return split_goto(arg)
 
 def goto_target(goto):
     """(文件, 行号, 列号) 拼回 --goto 的取值
@@ -756,7 +778,7 @@ def socket_status(sock, timeout=1.5):
 
     return parse_status(text)
 
-# 能和 open 报文一一对应的选项；其余选项（--wait / -g / 未知的）都交回 CLI
+# 能和 open 报文一一对应的选项；其余选项（--wait / --merge / 未知的）都交回 CLI
 OPEN_FLAGS = {
     '-r': 'forceReuseWindow', '--reuse-window': 'forceReuseWindow',
     '-n': 'forceNewWindow', '--new-window': 'forceNewWindow',
@@ -766,6 +788,12 @@ OPEN_FLAGS = {
 
 # --wait / -w 不在上表里：它不是布尔开关，而是要多带一个 waitMarkerFilePath
 WAIT_FLAGS = ('--wait', '-w')
+
+# -g / --goto 也不在上表里：它是带值的选项，取值就是 文件:行号[:列]。
+# CLI 收到它发的报文和位置参数 file:行号 完全一样（fixtures 的 open-goto-flag），
+# 所以直连照抄：取值原样拼进 fileURIs，并把 gotoLineMode 置 true
+GOTO_FLAGS = ('-g', '--goto')
+GOTO_EQ = '--goto='
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
 WAIT_POLL = 1.0
@@ -843,8 +871,12 @@ def wait_marker(path, interval=WAIT_POLL):
 def open_request(args, marker=None):
     """把命令行参数翻译成 socket 直连要发的 open 报文；翻不了返回 None
 
-    翻不了就交回 CLI：--merge / -g / 未知选项 / -- / 没给参数。
+    翻不了就交回 CLI：--merge / 未知选项 / -- / 没给参数。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
+
+    -g / --goto 也认（取值形式：-g X / --goto X / --goto=X）：取值原样拼进
+    fileURIs 并置 gotoLineMode，和 CLI 发的那份一致。取值本身不再过
+    parse_goto —— 它就是个跳转目标，不存在的文件也要带得上行号。
 
     --wait / -w 要带 marker（make_marker() 造的那个空文件路径）：带上就直连等
     窗口删它，没带就交回 CLI——CLI 自己会造一个。和 CLI 一样，--wait 必须至少
@@ -868,7 +900,17 @@ def open_request(args, marker=None):
     True
     >>> open_request(['--wait', '/']) is None       # --wait 只给目录，CLI 也不认
     True
-    >>> open_request(['-g', '/no-such-dir/x.py:3']) is None
+    >>> open_request(['-g', '/no-such-dir/x.py:3'])['fileURIs']
+    ['file:///no-such-dir/x.py:3']
+    >>> open_request(['--goto', '/no-such-dir/x.py:3'])['gotoLineMode']
+    True
+    >>> open_request(['--goto=/no-such-dir/x.py:3:5'])['fileURIs']
+    ['file:///no-such-dir/x.py:3:5']
+    >>> open_request(['-r', '-g', '/no-such-dir/x.py:3'])['forceReuseWindow']
+    True
+    >>> open_request(['-g']) is None                        # 没给取值
+    True
+    >>> open_request(['-g', '-r']) is None                  # 取值又是个选项
     True
     >>> open_request([]) is None
     True
@@ -886,9 +928,31 @@ def open_request(args, marker=None):
         'forceNewWindow': False,
     }
 
+    def goto_uri(value):
+        """-g 的取值 -> file URI：无条件按 :行号[:列] 拆，拆不动就整个当路径
+
+        不能直接 file_uri(value)：它把路径整体 percent 编码，:3 会变成 %3A。
+        """
+
+        goto = split_goto(value)
+
+        return file_uri(*goto) if goto else file_uri(value)
+
+    pending_goto = False            # 上一个参数是 -g / --goto，这个参数是它的取值
+
     for a in args:
         if a == '--':
             return None             # 之后的参数按字面量，交回 CLI
+
+        if pending_goto:
+            pending_goto = False
+
+            if a.startswith('-'):
+                return None         # 取值又是个选项：交回 CLI，让它自己报错
+
+            msg['fileURIs'].append(goto_uri(a))
+            msg['gotoLineMode'] = True
+            continue
 
         if a.startswith('-'):
             if a in WAIT_FLAGS:
@@ -898,9 +962,18 @@ def open_request(args, marker=None):
                 msg['waitMarkerFilePath'] = marker
                 continue
 
+            if a in GOTO_FLAGS:
+                pending_goto = True
+                continue
+
+            if a.startswith(GOTO_EQ):
+                msg['fileURIs'].append(goto_uri(a[len(GOTO_EQ):]))
+                msg['gotoLineMode'] = True
+                continue
+
             field = OPEN_FLAGS.get(a)
             if not field:
-                return None         # 不认识的选项（--merge / -g / …）交回 CLI
+                return None         # 不认识的选项（--merge / …）交回 CLI
 
             msg[field] = True
             continue
@@ -914,6 +987,9 @@ def open_request(args, marker=None):
             msg['folderURIs'].append(file_uri(a))
         else:
             msg['fileURIs'].append(file_uri(a))
+
+    if pending_goto:
+        return None                 # -g 后面没有取值：交回 CLI 让它报错
 
     if not msg['fileURIs'] and not msg['folderURIs']:
         return None                 # 没东西可开：保持 CLI 原来的行为
@@ -1170,7 +1246,7 @@ def main():
         return 1 if result.failed else 0
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
-    # 翻不了（-g / 未知选项）或发失败，就交给下面的 CLI 路径
+    # 翻不了（--merge / 未知选项）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
 
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
