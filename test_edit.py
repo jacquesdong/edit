@@ -9,6 +9,7 @@
   --list / --init；这些在进程内跑，靠 edit.PROC 指到假目录
 """
 
+import glob
 import importlib.util
 import json
 import os
@@ -35,12 +36,14 @@ spec.loader.exec_module(edit)
 class FakeWindow:
     """假装是一个 IDE 窗口的 socket：收 POST，按设定回复"""
 
-    def __init__(self, code=200, body='{}', silent=False, path=None):
+    def __init__(self, code=200, body='{}', silent=False, path=None,
+                 unlink_marker=False):
         # path 给定就绑在指定路径上：find_sockets 只认名字里带 vscode-ipc- 的 socket
         self.path = path or tempfile.mktemp(prefix='fake-window-', suffix='.sock')
         self.code = code
         self.body = body
         self.silent = silent
+        self.unlink_marker = unlink_marker
         self.requests = []
 
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -64,6 +67,13 @@ class FakeWindow:
                     msg = self._read(conn)
                     if msg is not None:
                         self.requests.append(msg)
+
+                        # 假装用户把文件关了：窗口就是删 marker 来通知 CLI 的
+                        if self.unlink_marker and msg.get('waitMarkerFilePath'):
+                            try:
+                                os.unlink(msg['waitMarkerFilePath'])
+                            except OSError:
+                                pass
 
                     if self.silent:
                         continue    # 连上就断，测"连不上"那条路
@@ -525,7 +535,9 @@ class ProtocolFixtureTest(unittest.TestCase):
             with self.subTest(name):
                 # diff 记的是我们与 CLI 故意不同的字段，值取我们的
                 want = dict(case['msg'], **case.get('diff', {}))
-                got = edit.open_request(case['args'])
+                # --wait 那条要带上 marker，否则按设计会翻不出来（交回 CLI）
+                got = edit.open_request(case['args'],
+                                        case['msg'].get('waitMarkerFilePath'))
 
                 if not case['direct']:
                     self.assertIsNone(got, '%s 现在该交回 CLI' % name)
@@ -542,6 +554,75 @@ class ProtocolFixtureTest(unittest.TestCase):
                     self.assertNotEqual(
                         case['msg'].get(key), ours,
                         '%s.%s 已经和 CLI 一致了，例外该删掉' % (name, key))
+
+
+class WaitTest(EditCase):
+    """--wait / -w：直连发 marker，等窗口把它删掉（= 等文件被关）"""
+
+    def test_marker_in_request(self):
+        for flag in ('--wait', '-w'):
+            with self.subTest(flag):
+                msg = edit.open_request([flag, self.a], '/m')
+
+                self.assertEqual(msg['waitMarkerFilePath'], '/m')
+                self.assertEqual(msg['fileURIs'], ['file://' + self.a])
+
+    def test_without_marker_falls_back(self):
+        """没给 marker 就翻不出来 —— CLI 自己会造一个"""
+
+        self.assertIsNone(edit.open_request(['--wait', self.a]))
+
+    def test_only_folder_falls_back(self):
+        """CLI 要求 --wait 至少带一个文件，只给目录它也不认"""
+
+        self.assertIsNone(edit.open_request(['--wait', self.spaced], '/m'))
+
+    def test_end_to_end(self):
+        """假窗口收到就删 marker：edit 该等到了再退，且不回退 CLI"""
+
+        self.win = self.add_window(unlink_marker=True)
+        proc = self.run_edit('--wait', self.a, hook=self.win.path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNone(self.cli_args(), '不该回退到 CLI')
+
+        marker = self.win.requests[-1]['waitMarkerFilePath']
+        self.assertTrue(os.path.basename(marker).startswith('edit-wait-'), marker)
+        self.assertFalse(os.path.exists(marker), 'marker 该被删掉')
+
+    def test_marker_cleaned_when_falls_back(self):
+        """报文翻不出来时不能把 marker 留在 /tmp"""
+
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*')))
+
+        self.win = self.add_window()
+        proc = self.run_edit('--wait', '-g', self.a, hook=self.win.path)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 被调起
+        # --wait 原样交回 CLI（它自己会造 marker 并等），我们造的那个已经收回
+        self.assertEqual(self.cli_args(), '--wait -g ' + self.a)
+
+        left = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*'))) - before
+        self.assertEqual(left, set(), 'marker 该被收回去')
+
+    def test_wait_marker_returns_when_deleted(self):
+        marker = self._touch('marker')
+
+        threading.Timer(0.05, lambda: os.path.exists(marker) and os.unlink(marker)).start()
+        edit.wait_marker(marker, interval=0.01)
+
+        self.assertFalse(os.path.exists(marker))
+
+    def test_wait_marker_removes_on_interrupt(self):
+        """Ctrl-C：先把 marker 收回去，再把中断抛给 main（那边转成 130）"""
+
+        marker = self._touch('marker')
+
+        with patch('time.sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                edit.wait_marker(marker)
+
+        self.assertFalse(os.path.exists(marker))
 
 
 class ListTest(ProcCase):

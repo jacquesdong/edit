@@ -254,7 +254,7 @@
       "--wait",
       "/tmp/a.txt"
     ],
-    "direct": false,
+    "direct": true,
     "msg": {
       "addMode": false,
       "diffMode": false,

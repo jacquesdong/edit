@@ -100,10 +100,36 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 ```
 有 VSCODE_IPC_HOOK_CLI ？
   ├─ 参数能翻译成 open 报文 → 直连 socket（不找 CLI、不起 node）
-  │     └─ HTTP 200 → 结束；否则 stderr 提示 + 回退 CLI
-  └─ 翻不了（--wait / -g / 未知选项 / -- / 无参数）或没有 socket → 交给 remote-cli
-        （code / buddycn / trae-cn，从 PATH 或 EDIT_CLI 找）
+  │     ├─ HTTP 200 → 结束；带 --wait 就再等窗口删 marker（见下）
+  │     └─ 否则 stderr 提示 + 回退 CLI
+  └─ 翻不了（-g / 未知选项 / -- / 无参数 / --wait 但没给文件）或没有 socket
+        → 交给 remote-cli（code / buddycn / trae-cn，从 PATH 或 EDIT_CLI 找）
 ```
+
+### `--wait` 是怎么等的
+
+`remote-cli` 的做法（`server-cli.js`，抓自本机安装目录）：
+
+```js
+if (i.wait) { if (!f.length) {…报错…; return}  d = lo(a) }   // mkstemp 空文件
+C1({type:"open", …, waitMarkerFilePath:d, …})                 // 发报文
+if (d) await Co(d)                                            // 等 marker 被删
+async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
+```
+
+窗口那一侧（`server-main.js`）把 `waitMarkerFilePath` 转成 `waitMarkerFileURI`
+交给 `_remoteCLI.windowOpen`，**关掉那个文件时就把它删掉** —— 这就是"通知"。
+我们照抄：
+
+- `make_marker()`：`tempfile.mkstemp(prefix='edit-wait-')`，空文件；
+- 报文里多一个 `waitMarkerFilePath`（fixtures 的 `open-wait` 就是这份快照，
+  已经标成 `direct:true`）；
+- `wait_marker()`：`while exists: sleep(1s)`，间隔照抄 CLI；Ctrl-C 时先把
+  marker 删掉再抛（main 那里转成 130）；
+- 翻不出来 / 发失败 / `--dry-run` 都把 marker 收回：交回 CLI 时它自己会造一个。
+
+`-w` 是 `--wait` 的别名（同上源码里 `wait:{type:"boolean",alias:"w"}`）。
+`--wait` 只给目录不认（CLI 要求至少一个文件），这种就交回 CLI 让它报错。
 
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
 
@@ -132,9 +158,9 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 
 ## 还没做 / 待办
 
-1. `--wait`（要 `waitMarkerFilePath`，等窗口回写 marker）、`--merge`、`-g` 现在都交回 CLI；
-   要不要也接上由需求决定。这三种的报文已经抓在 fixtures 里（`open-wait` /
-   `open-merge` / `open-goto-flag`，都标着 `direct:false`），接的时候照抄即可。
+1. ~~`--wait`~~ 已直连（见上：mkstemp marker + 等窗口删它，与 CLI 同机制）。
+   `--merge`、`-g` 还交回 CLI，要不要接看需求；报文已抓在 fixtures 里
+   （`open-merge` / `open-goto-flag`，标着 `direct:false`），接的时候照抄即可。
 2. `--interactive` 选中的窗口**直接开文件**还没做：现在只有当前终端的 hook 走直连。
    要支持"先挑窗口再开文件"，把选中的 socket 传下去，或在早期写回
    `os.environ[IPC_HOOK]`（那样四个 `current_socket()` 调用点一行都不用改）。

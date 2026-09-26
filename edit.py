@@ -6,6 +6,7 @@
 用法：
   edit <文件...>               在当前 IDE 窗口打开文件
   edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
+  edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
   edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -42,6 +43,11 @@
 打开文件其实可以不走 CLI：窗口 socket 上就是个 HTTP + JSON 接口
 （{"type":"open",…} / {"type":"status"}，remote-cli 自己也是这么发的），
 所以有 socket 时直接发；桌面版没有这种 socket，才落回 remote-cli。
+
+--wait 也是直连：先 mkstemp 一个空 marker，把它的路径放在报文的
+waitMarkerFilePath 里，窗口在文件被关掉时删掉它，我们等它消失 —— 和
+remote-cli 一模一样（它也是 createWaitMarkerFile + 每秒 existsSync 轮询），
+所以 git commit 之类的场景同样等得住，而且不起 node。
 """
 
 from __future__ import print_function, unicode_literals
@@ -54,6 +60,8 @@ import shlex
 import shutil
 import socket
 import sys
+import tempfile
+import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
@@ -756,11 +764,91 @@ OPEN_FLAGS = {
     '-d': 'diffMode', '--diff': 'diffMode',
 }
 
-def open_request(args):
+# --wait / -w 不在上表里：它不是布尔开关，而是要多带一个 waitMarkerFilePath
+WAIT_FLAGS = ('--wait', '-w')
+
+# CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
+WAIT_POLL = 1.0
+
+
+def wants_wait(args):
+    """命令行里有没有 --wait / -w（-- 之后的不算）
+
+    >>> wants_wait(['--wait', 'a.txt'])
+    True
+    >>> wants_wait(['-w', 'a.txt'])
+    True
+    >>> wants_wait(['a.txt'])
+    False
+    >>> wants_wait(['--', '--wait'])
+    False
+    """
+
+    for a in args:
+        if a == '--':
+            return False
+
+        if a in WAIT_FLAGS:
+            return True
+
+    return False
+
+
+def make_marker():
+    """给 --wait 造一个空 marker，返回路径；造不出来返回 None
+
+    和 CLI 一个做法（server-cli.js 的 createWaitMarkerFile）：mkstemp 一个空
+    文件，路径随报文交给窗口，窗口在编辑器里那个文件被关掉时删掉它。
+    """
+
+    try:
+        fd, path = tempfile.mkstemp(prefix='edit-wait-')
+    except OSError:
+        return None
+
+    os.close(fd)
+
+    return path
+
+
+def remove_marker(path):
+    """删 marker；没有、或删不掉都算了（它只是个哨兵）"""
+
+    if not path:
+        return
+
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def wait_marker(path, interval=WAIT_POLL):
+    """等窗口把 marker 删掉 —— 也就是等那个文件在编辑器里被关掉
+
+    CLI 就是这么等的（server-cli.js：while (existsSync(marker)) sleep(1s)），
+    轮询间隔照抄。被 Ctrl-C 打断时先把 marker 删掉再抛出：窗口那边还开着文件，
+    留着它既没用也白占 /tmp。
+
+    >>> wait_marker('/no-such-marker')      # 已经没了：立刻返回
+    """
+
+    try:
+        while os.path.exists(path):
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        remove_marker(path)
+        raise
+
+def open_request(args, marker=None):
     """把命令行参数翻译成 socket 直连要发的 open 报文；翻不了返回 None
 
-    翻不了就交回 CLI：--wait / --merge / -g / 未知选项 / -- / 没给参数。
+    翻不了就交回 CLI：--merge / -g / 未知选项 / -- / 没给参数。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
+
+    --wait / -w 要带 marker（make_marker() 造的那个空文件路径）：带上就直连等
+    窗口删它，没带就交回 CLI——CLI 自己会造一个。和 CLI 一样，--wait 必须至少
+    带一个文件，只给目录它不认。
 
     >>> open_request(['/no-such-dir/x.py'])['fileURIs']
     ['file:///no-such-dir/x.py']
@@ -772,7 +860,13 @@ def open_request(args):
     True
     >>> open_request(['/'])['folderURIs']           # 目录单独放
     ['file:///']
-    >>> open_request(['--wait', '/no-such-dir/x.py']) is None
+    >>> open_request(['--wait', '/no-such-dir/x.py'], '/m')['waitMarkerFilePath']
+    '/m'
+    >>> open_request(['-w', '/no-such-dir/x.py'], '/m')['waitMarkerFilePath']
+    '/m'
+    >>> open_request(['--wait', '/no-such-dir/x.py']) is None     # 没 marker
+    True
+    >>> open_request(['--wait', '/']) is None       # --wait 只给目录，CLI 也不认
     True
     >>> open_request(['-g', '/no-such-dir/x.py:3']) is None
     True
@@ -797,9 +891,16 @@ def open_request(args):
             return None             # 之后的参数按字面量，交回 CLI
 
         if a.startswith('-'):
+            if a in WAIT_FLAGS:
+                if not marker:
+                    return None     # 没有 marker，交回 CLI（它自己会造一个）
+
+                msg['waitMarkerFilePath'] = marker
+                continue
+
             field = OPEN_FLAGS.get(a)
             if not field:
-                return None         # 不认识的选项（--wait / -g / …）交回 CLI
+                return None         # 不认识的选项（--merge / -g / …）交回 CLI
 
             msg[field] = True
             continue
@@ -816,6 +917,9 @@ def open_request(args):
 
     if not msg['fileURIs'] and not msg['folderURIs']:
         return None                 # 没东西可开：保持 CLI 原来的行为
+
+    if marker and not msg['fileURIs']:
+        return None                 # CLI 要求 --wait 至少带一个文件
 
     return msg
 
@@ -1066,21 +1170,30 @@ def main():
         return 1 if result.failed else 0
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
-    # 翻不了（--wait / -g / 未知选项）或发失败，就交给下面的 CLI 路径
+    # 翻不了（-g / 未知选项）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
-    msg = open_request(args) if sock else None
+
+    # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
+    marker = make_marker() if sock and wants_wait(args) else None
+    msg = open_request(args, marker) if sock else None
 
     if msg:
         if flags.dry_run:
             print('socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False)))
+            remove_marker(marker)       # 没真发出去，别把临时文件留在 /tmp
             return
 
         ok, detail = socket_open(sock, msg)
 
         if ok:
+            if marker:
+                wait_marker(marker)     # 等窗口删 marker（= 等文件被关掉）
             return
 
         sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
+
+    # 走到这儿是要交回 CLI 了：它自己会造 marker，我们这个得收回去
+    remove_marker(marker)
 
     cli = find_cli()
     if not cli:

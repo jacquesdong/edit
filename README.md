@@ -13,6 +13,7 @@
 ```
 edit <文件...>               在当前 IDE 窗口打开文件
 edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
+edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
 edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
 eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -33,9 +34,13 @@ edit --init fish --interactive   列出窗口并挑一个，输出它的初始�
    URI 里（`file:///x.py:12:3`，冒号不转义）。协议是从 `remote-cli`（`out/server-cli.js`）
    抓包对出来的，字段与它逐字节一致；回复只认 HTTP 200。
    这条路径不需要 PATH 里有 `remote-cli`，也不起 node。
-2. **remote-cli**：没有 socket（桌面版），或参数翻不了（`--wait` / `-g` / 未知选项 /
-   无参数）时，照旧找 `code` / `buddycn` / `trae-cn` 去开。直连失败也会回退到这里，
-   并在 stderr 留一行提示。
+2. **remote-cli**：没有 socket（桌面版），或参数翻不了（`-g` / 未知选项 /
+   `--wait` 但没给文件 / 无参数）时，照旧找 `code` / `buddycn` / `trae-cn` 去开。
+   直连失败也会回退到这里，并在 stderr 留一行提示。
+
+`--wait` / `-w` 也走直连：先 mkstemp 一个空 marker，把路径放进报文的
+`waitMarkerFilePath`，窗口关掉文件时删它，我们等它消失 —— 和 `remote-cli` 同机制
+（它也是"造 marker + 每秒轮询"），所以当 `$EDITOR` / `core.editor` 用时全程不起 node。
 
 `--list` / `--init --interactive` 会用同一个 socket 直连问每个候选窗口一次只读
 `{"type":"status"}`，从回复的 `Process Argv: --remote <authority> <workspace>` 取得
