@@ -10,8 +10,11 @@
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
-  edit --list                  列出存活的 IDE 窗口（socket / pid / remote-cli）
+  edit --list                  列出存活的 IDE 窗口（只读，不读 stdin）
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
+
+  edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
+                                   （普通终端里没有 hook 时用这个）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -445,16 +448,26 @@ def apply_goto(args, kind):
 
     return out
 
-def print_init_script(shell):
-    hook = get_ipc_hook()
+def print_init_script(shell, hook=None, cli_dir=None):
+    """输出可直接导入当前 shell 的片段
+
+    hook   要写进 VSCODE_IPC_HOOK_CLI 的 socket 路径
+    cli_dir  要 prepend 进 PATH 的 remote-cli 目录
+
+    缺值（或 cli_dir 不是目录）时什么都不打印，由调用方负责报错：
+    main 的 --init 分支从当前终端取，--interactive 分支从选中的窗口取。
+    """
+
     if not hook:
-        sys.exit('edit --init: 当前终端没有 {}（请在 IDE 集成终端里生成）'.format(IPC_HOOK))
+        return
 
-    cli = find_remote_cli()
-    if not cli:
-        sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成）'.format(' / '.join(CODE_LIKE)))
+    if not cli_dir:
+        return
 
-    path = os.path.dirname(cli[0])
+    if not os.path.isdir(cli_dir):
+        return
+
+    path = cli_dir
 
     # 值一律 shlex.quote：输出只含单引号段，bash / dash / fish 都认
     hook = shlex.quote(hook)
@@ -542,9 +555,18 @@ def find_sockets():
             install = os.path.dirname(exe)  # <安装目录>/node -> <安装目录>
             cli = choose_cli_exe(os.path.join(install, 'bin', 'remote-cli'))
 
-            if sock in found and (found[sock]['cli'] or not cli):
-                continue  # 同一个 socket 被继承时留有用的那个
+            # 同一个 socket 可能被多个进程 / fd 认领，而 install / cli / pid 都取自
+            # "认领它的那个进程"，所以优先留能推出 <安装目录>/bin/remote-cli 的那条
+            old = found.get(sock)
 
+            if old is not None:
+                if old['cli']:
+                    continue        # 已有能推出 CLI 的记录，不动
+
+                if not cli:
+                    continue        # 两条都推不出，也留旧的（免得 pid 随遍历顺序变）
+
+            # 首次见到，或旧的推不出而新的推得出 -> 记下新的
             found[sock] = {
                 'sock': sock,
                 'pid': pid,
@@ -554,29 +576,131 @@ def find_sockets():
 
     return [found[i] for i in sorted(found)]
 
-def print_sockets():
-    socks = find_sockets()
+def format_sockets(socks, hook):
+    """把候选渲染成表格行：--list 打印它，--init --interactive 也用它
 
-    if socks is None:
-        sys.exit('edit --list: 这里没有窗口可挑（桌面版 CLI 自己会复用当前窗口，'
-                 '直接 edit <文件> 即可）')
+    打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI。
+    和 hook 相同的那个用 * 标出来。
 
-    if not socks:
-        sys.exit('edit --list: 没有存活的 IDE 窗口')
+    >>> s = [{'sock': '/r/vscode-ipc-a.sock', 'pid': '1',
+    ...       'install': '/i', 'cli': '/i/bin/remote-cli/buddycn'}]
+    >>> format_sockets(s, '/r/vscode-ipc-a.sock')[1].split()[0]
+    '*'
+    >>> format_sockets(s, None)[1].split()[0]
+    '1'
+    >>> format_sockets(s, None)[1].split()[-2:]
+    ['buddycn', '/i']
+    >>> b = [{'sock': '/r/a b.sock', 'pid': '1', 'install': '/i', 'cli': ''}]
+    >>> " '/r/a b.sock'" in format_sockets(b, None)[1]
+    True
+    >>> format_sockets(b, None)[1].split()[-2]      # cli 读不到时打 ?
+    '?'
+    """
 
-    hook = get_ipc_hook()
-
-    # 打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI
-    print('  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'install'))
+    lines = ['  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'install')]
 
     for n, s in enumerate(socks, 1):
         mark = '*' if s['sock'] == hook else ' '
-        install = s['install']
 
         # shlex.quote：路径含空格时整行还能直接粘回 shell；正常路径不加引号
-        print('%s %2d  %-67s %-8s %-9s %s' %
-              (mark, n, shlex.quote(s['sock']), s['pid'],
-               os.path.basename(s['cli']) or '?', install))
+        lines.append('%s %2d  %-67s %-8s %-9s %s' %
+                     (mark, n, shlex.quote(s['sock']), s['pid'],
+                      os.path.basename(s['cli']) or '?', s['install']))
+
+    return lines
+
+def load_sockets(tag):
+    """取候选；不适用 / 一个都没有时按 tag 报错退出
+
+    tag 形如 'edit --list'、'edit --init --interactive'，只用来拼错误信息。
+    """
+
+    socks = find_sockets()
+
+    if socks is None:
+        sys.exit('%s: 这里没有窗口可挑（桌面版 CLI 自己会复用当前窗口，'
+                 '直接 edit <文件> 即可）' % tag)
+
+    if not socks:
+        sys.exit('%s: 没有存活的 IDE 窗口' % tag)
+
+    return socks
+
+def print_sockets():
+    socks = load_sockets('edit --list')
+
+    print('\n'.join(format_sockets(socks, get_ipc_hook())))
+
+def pick_socket(socks, answer, hook=None):
+    """把用户输入解释成候选项；认不出返回 None
+
+    '2' -> socks[1]；空行 -> hook 指向的那个（当前窗口）；
+    其余（'q'、非数字、越界）-> None
+
+    >>> socks = [{'sock': '/a.sock'}, {'sock': '/b.sock'}]
+    >>> pick_socket(socks, '2')
+    {'sock': '/b.sock'}
+    >>> pick_socket(socks, '2 ')
+    {'sock': '/b.sock'}
+    >>> pick_socket(socks, '', '/a.sock')
+    {'sock': '/a.sock'}
+    >>> pick_socket(socks, '') is None
+    True
+    >>> pick_socket(socks, '0') is None
+    True
+    >>> pick_socket(socks, '3') is None
+    True
+    >>> pick_socket(socks, 'q') is None
+    True
+    """
+
+    answer = answer.strip()
+
+    if not answer:
+        for s in socks:
+            if s['sock'] == hook:
+                return s
+        return None
+
+    if not answer.isdigit():
+        return None
+
+    n = int(answer)
+
+    if not 1 <= n <= len(socks):
+        return None
+
+    return socks[n - 1]
+
+def ask_socket(socks):
+    """列出候选并让用户挑一个，返回候选项
+
+    候选和提示都写 stderr：stdout 要留给最终的初始化片段，这样
+    `edit --init fish --interactive | source` 才不会被提示语打断。
+    有 hook 时（= 当前终端连着某个窗口）回车表示那个窗口；没有 hook 就没有
+    当前窗口，只能输编号。q / EOF / 认不出的输入都算取消。
+    """
+
+    hook = get_ipc_hook()
+
+    sys.stderr.write('\n'.join(format_sockets(socks, hook)) + '\n')
+    if hook:
+        sys.stderr.write('选择窗口编号 [1-%d]（回车 = 当前窗口，q = 取消）: ' % len(socks))
+    else:
+        sys.stderr.write('选择窗口编号 [1-%d]（q = 取消）: ' % len(socks))
+    sys.stderr.flush()
+
+    try:
+        # input 不带 prompt：它的 prompt 写 stdout，会把片段流弄脏
+        answer = input()
+    except EOFError:
+        sys.exit('edit --init --interactive: 没读到编号（stdin 已结束）')
+
+    chosen = pick_socket(socks, answer, hook)
+    if not chosen:
+        sys.exit('edit --init --interactive: 没有选中窗口')
+
+    return chosen
 
 def print_usage():
     """打印本文件开头的用法说明
@@ -591,6 +715,7 @@ def build_args():
 
     parser.add_argument('--init', choices=['fish', 'bash'])
     parser.add_argument('--list', action='store_true')
+    parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
@@ -607,10 +732,40 @@ def main():
         print_usage()
         return
 
+    if flags.interactive and not flags.init:
+        sys.exit('edit --interactive: 现在只和 --init 一起用')
+
     if flags.init:
         if args:
             sys.exit('edit --init 不接受文件参数')
-        print_init_script(flags.init)
+
+        if flags.list:
+            sys.exit('edit --init 和 edit --list 冲突（挑窗口请用 --interactive）')
+
+        if flags.interactive:
+            # 列出候选（stderr）挑一个，用它的 hook 和 CLI 目录输出片段
+            s = ask_socket(load_sockets('edit --init --interactive'))
+            # cli 读不到时（别人的进程，权限不够）退回按安装目录推
+            cli_dir = os.path.dirname(s['cli']) or os.path.join(s['install'], 'bin', 'remote-cli')
+
+            if not os.path.isdir(cli_dir):
+                # print_init_script 取不到值就静默不输出，所以这里先判一次
+                sys.exit('edit --init --interactive: {} 不是目录（换个窗口试试）'.format(cli_dir))
+
+            print_init_script(flags.init, s['sock'], cli_dir)
+        else:
+            hook = get_ipc_hook()
+            if not hook:
+                sys.exit('edit --init: 当前终端没有 {}（请在 IDE 集成终端里生成，'
+                         '或用 edit --init <shell> --interactive 挑一个窗口）'.format(IPC_HOOK))
+
+            cli = find_remote_cli()
+            if not cli:
+                sys.exit('edit --init: 当前终端没找到 {}（请在 IDE 集成终端里生成，'
+                         '或用 edit --init <shell> --interactive 挑一个窗口）'.format(' / '.join(CODE_LIKE)))
+
+            print_init_script(flags.init, hook, os.path.dirname(cli[0]))
+
         return
 
     if flags.list:
