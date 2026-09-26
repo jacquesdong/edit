@@ -1,0 +1,290 @@
+{
+  "open-add": {
+    "args": [
+      "-a",
+      "/tmp/a.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": true,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-diff": {
+    "args": [
+      "-d",
+      "/tmp/a.txt",
+      "/tmp/b.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": true,
+      "fileURIs": [
+        "file:///tmp/a.txt",
+        "file:///tmp/b.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-file": {
+    "args": [
+      "/tmp/a.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-folder": {
+    "args": [
+      "/tmp"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [],
+      "folderURIs": [
+        "file:///tmp"
+      ],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-goto": {
+    "args": [
+      "/tmp/a.txt:3"
+    ],
+    "diff": {
+      "gotoLineMode": true
+    },
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt:3"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-goto-col": {
+    "args": [
+      "/tmp/a.txt:3:5"
+    ],
+    "diff": {
+      "gotoLineMode": true
+    },
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt:3:5"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-goto-flag": {
+    "args": [
+      "--goto",
+      "/tmp/a.txt:3"
+    ],
+    "direct": false,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt:3"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": true,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-merge": {
+    "args": [
+      "--merge",
+      "/tmp/a.txt",
+      "/tmp/b.txt",
+      "/tmp/base.txt",
+      "/tmp/result.txt"
+    ],
+    "direct": false,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt",
+        "file:///tmp/b.txt",
+        "file:///tmp/base.txt",
+        "file:///tmp/result.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": true,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-new": {
+    "args": [
+      "-n",
+      "/tmp/a.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": true,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-reuse": {
+    "args": [
+      "-r",
+      "/tmp/a.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": true,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-wait": {
+    "args": [
+      "--wait",
+      "/tmp/a.txt"
+    ],
+    "direct": false,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open",
+      "waitMarkerFilePath": "<marker>"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "status": {
+    "args": [
+      "--status"
+    ],
+    "direct": true,
+    "msg": {
+      "type": "status"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  }
+}

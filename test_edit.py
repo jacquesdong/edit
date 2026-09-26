@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDIT = os.path.join(HERE, 'edit.py')
+FIXTURES = os.path.join(HERE, 'fixtures', 'protocol.json')
 
 spec = importlib.util.spec_from_file_location('edit', EDIT)
 edit = importlib.util.module_from_spec(spec)
@@ -320,6 +321,13 @@ class FallbackTest(EditCase):
                 self.assertNotIn('socket 打不开', proc.stderr)
 
 
+def load_fixtures():
+    """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）"""
+
+    with open(FIXTURES, encoding='utf-8') as f:
+        return json.load(f)
+
+
 def status_body(workspace, authority='ssh-remote+7'):
     """假窗口答 status 时用的正文：JSON 字符串，里面含窗口自己的 argv
 
@@ -482,6 +490,58 @@ class ProbeTest(ProcCase):
 
         self.assertIsNone(socks[0]['workspace'])
         self.assertIsNone(socks[1]['workspace'])
+
+    def test_status_request_matches_cli(self):
+        """探测用的 status 报文要和 CLI 的一模一样"""
+
+        w = self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        edit.probe_workspaces(self.candidates())
+
+        self.assertEqual(w.requests[-1], load_fixtures()['status']['msg'])
+
+
+class ProtocolFixtureTest(unittest.TestCase):
+    """拿真 CLI 的报文快照对照 open_request
+
+    断言的是"字段集合 + 取值"，不是字节：CLI 用 chunked + keep-alive，我们用
+    content-length + close，HTTP 头本来就不同（见 NOTES）。
+    direct=false 那几条是现在交回 CLI 的，断言 open_request 翻不出来 —— 哪天
+    直连支持了，这条会失败，正好提醒把 direct 改成 true。
+    """
+
+    def cases(self):
+        data = load_fixtures()
+
+        self.assertTrue(data, 'fixtures/protocol.json 是空的')
+
+        return data
+
+    def test_open_matches_cli(self):
+        for name, case in sorted(self.cases().items()):
+            if case['msg'].get('type') != 'open':
+                continue                            # status 另有断言
+
+            with self.subTest(name):
+                # diff 记的是我们与 CLI 故意不同的字段，值取我们的
+                want = dict(case['msg'], **case.get('diff', {}))
+                got = edit.open_request(case['args'])
+
+                if not case['direct']:
+                    self.assertIsNone(got, '%s 现在该交回 CLI' % name)
+                    continue
+
+                self.assertEqual(got, want)
+
+    def test_diff_is_still_needed(self):
+        """标了 diff 的字段必须真的与 CLI 不同，否则上游改了、例外该删"""
+
+        for name, case in sorted(self.cases().items()):
+            for key, ours in (case.get('diff') or {}).items():
+                with self.subTest(name + '.' + key):
+                    self.assertNotEqual(
+                        case['msg'].get(key), ours,
+                        '%s.%s 已经和 CLI 一致了，例外该删掉' % (name, key))
 
 
 class ListTest(ProcCase):

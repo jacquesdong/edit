@@ -24,6 +24,11 @@ Content-Length: 189
  "forceReuseWindow":false,"forceNewWindow":false}
 ```
 
+**只有正文与 CLI 逐字节一致，HTTP 头不同**：CLI 发的是
+`Transfer-Encoding: chunked` + `Connection: keep-alive`（`server-cli.js` 自己这么发），
+`edit` 发的是 `content-length` + `connection: close`。两种服务端都收，
+实测 `edit` 直连能开文件，所以头不必对齐 —— 对齐了反而要处理 keep-alive。
+
 服务端（`out/server-main.js`）只分派四种 `type`：
 
 | type | 作用 | 回复 |
@@ -53,6 +58,12 @@ URI 编码与 `remote-cli` 逐字节一致：空格 `%20`、非 ASCII 按 UTF-8 
 **行号前的冒号不转义**（所以不能用 `pathlib.Path.as_uri()`，它会把 `:` 编成 `%3A`）。
 
 `remoteAuthority` / `waitMarkerFilePath` 只有在对应场景才发，普通 open 没有。
+`--wait` 时多一个 `waitMarkerFilePath`（CLI 现造的临时文件，每次路径都不同）。
+
+**唯一与 CLI 故意不同的字段**：`gotoLineMode`。CLI 只有 `--goto` / `-g` 才发 `true`，
+位置参数 `code file:3` 发的是 **`false`**（`:3` 照样拼在 URI 里，也就是不跳行）；
+而 `edit file:3` 要的是"跳到第 3 行"，所以按 `--goto` 的语义发 `true`。
+这条差异记在 fixtures 对应条目的 `diff` 里，不是 bug。
 
 ### 怎么再摸一次协议
 
@@ -67,6 +78,22 @@ subprocess.run([cli, '--goto', '/tmp/a.txt:3'], env=env, timeout=3)   # 会一�
 ```
 
 注意 CLI 会等回复（我们那次等超时了），所以给它 3 秒左右就够。
+
+这段已经固化成 `tools/capture_cli.py`：
+
+```bash
+python3 tools/capture_cli.py --name open-diff -- -d /tmp/a.txt /tmp/b.txt
+python3 tools/capture_cli.py --name open-goto --except gotoLineMode=true -- /tmp/a.txt:3
+```
+
+它起假窗口、把 `VSCODE_IPC_HOOK_CLI` 指过去、跑一次 CLI，把报文脱敏后写进
+`fixtures/protocol.json`（`waitMarkerFilePath` → `<marker>`、家目录 → `<home>`）。
+`test_edit.py` 的 `ProtocolFixtureTest` / `ProbeTest` 拿它当基准，对照
+`open_request()` 与 `status` 探测。
+
+抓包要真 CLI，所以**它不在测试里跑**，测试只读 fixtures。fixtures 只有一份：
+code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **逐字节相同**
+（同一套 `server-cli.js`），按产品分只是冗余，真正的变量是版本。
 
 ## 执行路径
 
@@ -106,7 +133,8 @@ subprocess.run([cli, '--goto', '/tmp/a.txt:3'], env=env, timeout=3)   # 会一�
 ## 还没做 / 待办
 
 1. `--wait`（要 `waitMarkerFilePath`，等窗口回写 marker）、`--merge`、`-g` 现在都交回 CLI；
-   要不要也接上由需求决定。
+   要不要也接上由需求决定。这三种的报文已经抓在 fixtures 里（`open-wait` /
+   `open-merge` / `open-goto-flag`，都标着 `direct:false`），接的时候照抄即可。
 2. `--interactive` 选中的窗口**直接开文件**还没做：现在只有当前终端的 hook 走直连。
    要支持"先挑窗口再开文件"，把选中的 socket 传下去，或在早期写回
    `os.environ[IPC_HOOK]`（那样四个 `current_socket()` 调用点一行都不用改）。

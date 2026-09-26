@@ -47,8 +47,18 @@ edit --init fish --interactive   列出窗口并挑一个，输出它的初始�
 python3 edit.py --self-test      # 纯函数 doctest（不开窗口、毫秒级）
 python3 test_edit.py -v          # 回归：假窗口 + 假 CLI，不碰真实 IDE
 ruff check .                     # 用仓库里的 ruff.toml
+python3 -m doctest tools/capture_cli.py   # 抓包工具的 doctest
+
+# 手动（要真 IDE 的 CLI）：把 CLI 自己发的报文抓进 fixtures/protocol.json
+python3 tools/capture_cli.py --name open-goto -- /tmp/a.txt:3
 ```
 
 `test_edit.py` 里的 `FakeWindow` 会起一个真的 AF_UNIX server 假装成 IDE 窗口，
 因此"发出去的报文""HTTP 500 时回退 CLI""窗口连上就断"这些都能确定性测到，
 而 `EDIT_CLI` 永远指向假 CLI —— 万一代码偷偷走了 CLI，测试里会立刻看出来。
+
+`fixtures/protocol.json` 是从真 CLI（code / trae-cn / buddycn 实测逐字节相同）
+抓下来的报文快照，`ProtocolFixtureTest` 拿它对照 `open_request()`：字段集合与
+取值必须一致，标了 `diff` 的字段是我们故意不同的（目前只有 `gotoLineMode`），
+`direct:false` 那几条是现在交回 CLI 的。抓包靠 `tools/capture_cli.py`，要真 CLI，
+所以不进测试，测试只读 fixtures。
