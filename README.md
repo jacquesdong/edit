@@ -58,6 +58,10 @@ python3 -m doctest tools/capture_cli.py   # 抓包工具的 doctest
 python3 tools/capture_cli.py --name open-goto -- /tmp/a.txt:3
 ```
 
+只跑 `ruff check`，**没有采用 `ruff format`**：仓库故意用了魔尾逗号（`[cli,]`）
+和等号对齐（`CLI_KIND_VIM  = 'vim'`）这类写法，格式化会把它们拆开/压平
+（全量重排约 225 行，纯格式、无语义变化）。要统一得先接受那次全量重排。
+
 `test_edit.py` 里的 `FakeWindow` 会起一个真的 AF_UNIX server 假装成 IDE 窗口，
 因此"发出去的报文""HTTP 500 时回退 CLI""窗口连上就断"这些都能确定性测到，
 而 `EDIT_CLI` 永远指向假 CLI —— 万一代码偷偷走了 CLI，测试里会立刻看出来。
