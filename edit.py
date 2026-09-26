@@ -29,7 +29,8 @@
   VSCODE_IPC_HOOK_CLI，否则 CLI 直接拒绝执行，那种场景才需要 --init。
 
   行号认两种写法：位置参数 文件:行号，以及 -g / --goto 的取值。
-  此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI。
+  此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI；其中 -g 带 1 个取值、
+  -m / --merge 带 4 个（path1 path2 base result），取值不够就交回 CLI 报错。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
@@ -802,7 +803,8 @@ def socket_status(sock, timeout=1.5):
 
     return parse_status(text)
 
-# 能和 open 报文一一对应的选项；其余选项（--wait / --merge / 未知的）都交回 CLI
+# 能和 open 报文一一对应的选项；--wait / -g / -m 要另外处理（见下），
+# 剩下的不认识的选项才交回 CLI
 OPEN_FLAGS = {
     '-r': 'forceReuseWindow', '--reuse-window': 'forceReuseWindow',
     '-n': 'forceNewWindow', '--new-window': 'forceNewWindow',
@@ -818,6 +820,13 @@ WAIT_FLAGS = ('--wait', '-w')
 # 所以直连照抄：取值原样拼进 fileURIs，并把 gotoLineMode 置 true
 GOTO_FLAGS = ('-g', '--goto')
 GOTO_EQ = '--goto='
+
+# -m / --merge 同样带值，而且要吃 4 个：path1 path2 base result（CLI 就是这么
+# 声明的：merge:{args:["path1","path2","base","result"]}）。四个路径原样进
+# fileURIs 并置 mergeMode，少一个就交回 CLI（fixtures 的 open-merge /
+# open-merge-short 是证据）
+MERGE_FLAGS = ('-m', '--merge')
+MERGE_ARITY = 4
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
 WAIT_POLL = 1.0
@@ -895,12 +904,15 @@ def wait_marker(path, interval=WAIT_POLL):
 def open_request(args, marker=None):
     """把命令行参数翻译成 socket 直连要发的 open 报文；翻不了返回 None
 
-    翻不了就交回 CLI：--merge / 未知选项 / -- / 没给参数。
+    翻不了就交回 CLI：未知选项 / -- / 取值不够 / 没给参数。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
 
     -g / --goto 也认（取值形式：-g X / --goto X / --goto=X）：取值原样拼进
     fileURIs 并置 gotoLineMode，和 CLI 发的那份一致。取值本身不再过
     parse_goto —— 它就是个跳转目标，不存在的文件也要带得上行号。
+
+    -m / --merge 认 4 个取值（path1 path2 base result）：原样进 fileURIs 并置
+    mergeMode。少一个、或某个取值又是个选项，都交回 CLI 让它自己报错。
 
     --wait / -w 要带 marker（make_marker() 造的那个空文件路径）：带上就直连等
     窗口删它，没带就交回 CLI——CLI 自己会造一个。和 CLI 一样，--wait 必须至少
@@ -931,6 +943,16 @@ def open_request(args, marker=None):
     >>> open_request(['--goto=/no-such-dir/x.py:3:5'])['fileURIs']
     ['file:///no-such-dir/x.py:3:5']
     >>> open_request(['-r', '-g', '/no-such-dir/x.py:3'])['forceReuseWindow']
+    True
+    >>> open_request(['-m', '/a', '/b', '/base', '/res'])['mergeMode']
+    True
+    >>> open_request(['--merge', '/a', '/b', '/base', '/res'])['fileURIs']
+    ['file:///a', 'file:///b', 'file:///base', 'file:///res']
+    >>> open_request(['-r', '-m', '/a', '/b', '/base', '/res'])['forceReuseWindow']
+    True
+    >>> open_request(['-m', '/a', '/b', '/base']) is None        # 少一个
+    True
+    >>> open_request(['-m', '/a', '-r', '/base', '/res']) is None  # 取值又是个选项
     True
     >>> open_request(['-g']) is None                        # 没给取值
     True
@@ -963,6 +985,7 @@ def open_request(args, marker=None):
         return file_uri(*goto) if goto else file_uri(value)
 
     pending_goto = False            # 上一个参数是 -g / --goto，这个参数是它的取值
+    pending_merge = 0               # -m / --merge 还剩几个取值没吃
 
     for a in args:
         if a == '--':
@@ -976,6 +999,15 @@ def open_request(args, marker=None):
 
             msg['fileURIs'].append(goto_uri(a))
             msg['gotoLineMode'] = True
+            continue
+
+        if pending_merge:
+            pending_merge -= 1
+
+            if a.startswith('-'):
+                return None         # 同上
+
+            msg['fileURIs'].append(file_uri(a))
             continue
 
         if a.startswith('-'):
@@ -995,9 +1027,14 @@ def open_request(args, marker=None):
                 msg['gotoLineMode'] = True
                 continue
 
+            if a in MERGE_FLAGS:
+                pending_merge = MERGE_ARITY
+                msg['mergeMode'] = True
+                continue
+
             field = OPEN_FLAGS.get(a)
             if not field:
-                return None         # 不认识的选项（--merge / …）交回 CLI
+                return None         # 不认识的选项交回 CLI
 
             msg[field] = True
             continue
@@ -1012,8 +1049,8 @@ def open_request(args, marker=None):
         else:
             msg['fileURIs'].append(file_uri(a))
 
-    if pending_goto:
-        return None                 # -g 后面没有取值：交回 CLI 让它报错
+    if pending_goto or pending_merge:
+        return None                 # -g / -m 的取值没给够：交回 CLI 让它报错
 
     if not msg['fileURIs'] and not msg['folderURIs']:
         return None                 # 没东西可开：保持 CLI 原来的行为
@@ -1365,7 +1402,7 @@ def main():
         return 1 if result.failed else 0
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
-    # 翻不了（--merge / 未知选项）或发失败，就交给下面的 CLI 路径
+    # 翻不了（未知选项 / -- / 取值不够）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
 
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI

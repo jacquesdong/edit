@@ -203,7 +203,37 @@
       "/tmp/base.txt",
       "/tmp/result.txt"
     ],
-    "direct": false,
+    "direct": true,
+    "msg": {
+      "addMode": false,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt",
+        "file:///tmp/b.txt",
+        "file:///tmp/base.txt",
+        "file:///tmp/result.txt"
+      ],
+      "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": true,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-merge-short": {
+    "args": [
+      "-m",
+      "/tmp/a.txt",
+      "/tmp/b.txt",
+      "/tmp/base.txt",
+      "/tmp/result.txt"
+    ],
+    "direct": true,
     "msg": {
       "addMode": false,
       "diffMode": false,

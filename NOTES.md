@@ -53,6 +53,7 @@ Content-Length: 189
 | `edit -n a.txt` | `forceNewWindow:true` |
 | `edit -a a.txt` | `addMode:true` |
 | `edit -d a.txt b.txt` | `diffMode:true`，两个 `fileURIs` |
+| `edit -m a.txt b.txt base res` | `mergeMode:true`，四个 `fileURIs`（path1 path2 base result） |
 | `edit somedir/` | 进 `folderURIs`，`fileURIs` 为空 |
 
 URI 编码与 `remote-cli` 逐字节一致：空格 `%20`、非 ASCII 按 UTF-8 percent 编码，
@@ -205,8 +206,12 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
    `-g` / `--goto` 也已直连：取值就是跳转目标，无条件按 `:行号[:列]` 拆
    （`split_goto()`，不做"真实文件优先"那层判断 —— CLI 也是这么拆的，
    fixtures 的 `open-goto-short` / `open-goto-flag` 都是证据）。取值缺失或
-   又是个选项时交回 CLI 让它报错。`--merge` 仍交回 CLI（fixtures 的
-   `open-merge` 标着 `direct:false`），要接照抄即可。
+   又是个选项时交回 CLI 让它报错。
+   `--merge` / `-m` 也已直连：吃 4 个路径（path1 path2 base result）原样进
+   `fileURIs` 并置 `mergeMode`，不足 4 个、或某个取值又是个选项，交回 CLI
+   （fixtures 的 `open-merge` / `open-merge-short` 已标 `direct:true`）。
+   路径是相对时 CLI 也按 cwd 解成绝对（试过 `-m rel1 …` -> `file:///tmp/rel1`）。
+   真机验过：`edit -m <4 个路径>` 发给另一个窗口，退出 0（窗口收下，不起 node）。
 2. ~~`--interactive` 选中的窗口**直接开文件**~~ 已支持：`edit --interactive <文件>`
    挑完窗口把 socket 早期写回 `os.environ[IPC_HOOK]`，四个 `current_socket()`
    调用点一行没改 —— 直连、--init 的默认值、回退 CLI 继承的环境全都跟着走。

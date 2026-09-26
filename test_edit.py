@@ -323,6 +323,70 @@ class GotoTest(EditCase):
         self.assertEqual(msg['gotoLineMode'], True)
 
 
+class MergeTest(EditCase):
+    """-m / --merge：吃 4 个路径（path1 path2 base result），见 open-merge-short"""
+
+    def test_forms(self):
+        """-m 与 --merge 等价：4 个路径原样进 fileURIs，并置 mergeMode"""
+
+        want = ['file://' + p for p in (self.a, self.b, self.a, self.b)]
+
+        for flag in ('-m', '--merge'):
+            with self.subTest(flag):
+                msg = edit.open_request([flag, self.a, self.b, self.a, self.b])
+
+                self.assertEqual(msg['fileURIs'], want)
+                self.assertEqual(msg['mergeMode'], True)
+                self.assertEqual(msg['diffMode'], False)
+
+    def test_relative_becomes_absolute(self):
+        """相对路径按 cwd 解成绝对路径 —— CLI 也是这么发的（capture 里试过）"""
+
+        msg = edit.open_request(['-m', 'a', 'b', 'base', 'res'])
+
+        self.assertEqual(msg['fileURIs'],
+                         ['file://' + os.path.join(os.getcwd(), n)
+                          for n in ('a', 'b', 'base', 'res')])
+
+    def test_too_few_paths_falls_back(self):
+        """不足 4 个路径：交回 CLI 让它自己报错"""
+
+        for args in (['-m'], ['-m', self.a], ['-m', self.a, self.b],
+                     ['-m', self.a, self.b, self.a]):
+            with self.subTest(args):
+                self.assertIsNone(edit.open_request(args))
+
+    def test_value_is_option_falls_back(self):
+        """4 个取值里混进一个选项：同样交回 CLI"""
+
+        self.assertIsNone(edit.open_request(['-m', self.a, '-r', self.b, self.a]))
+
+    def test_mixes_with_flags(self):
+        msg = edit.open_request(['-r', '-m', self.a, self.b, self.a, self.b])
+
+        self.assertEqual(msg['forceReuseWindow'], True)
+        self.assertEqual(msg['mergeMode'], True)
+        self.assertEqual(msg['fileURIs'],
+                         ['file://' + p for p in (self.a, self.b, self.a, self.b)])
+
+    def test_wait_marker(self):
+        """--wait -m …：4 个路径也算"有文件"，带上 marker 就能直连"""
+
+        msg = edit.open_request(['--wait', '-m', self.a, self.b, self.a, self.b], '/m')
+
+        self.assertEqual(msg['waitMarkerFilePath'], '/m')
+        self.assertEqual(msg['mergeMode'], True)
+
+    def test_sent_to_window(self):
+        """端到端：真发给假窗口，不回退 CLI"""
+
+        msg = self.open_msg('-m', self.a, self.b, self.a, self.b)
+
+        self.assertEqual(msg['mergeMode'], True)
+        self.assertEqual(msg['fileURIs'],
+                         ['file://' + p for p in (self.a, self.b, self.a, self.b)])
+
+
 class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""
 
@@ -383,10 +447,9 @@ class FallbackTest(EditCase):
         self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
 
     def test_untranslatable_args(self):
-        """--wait / --merge / 无参数 / 没有 socket：一律交给 CLI"""
+        """--wait / 取值不够的 --merge / 无参数 / 没有 socket：一律交给 CLI"""
 
-        for args in (['--wait', self.a],
-                     ['--merge', self.a, self.b, self.a, self.b], []):
+        for args in (['--wait', self.a], ['--merge', self.a], []):
             with self.subTest(args):
                 proc = self.run_edit(*args)
 
@@ -666,7 +729,8 @@ class WaitTest(EditCase):
         proc = self.run_edit('--wait', '--merge', self.a, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 被调起
-        # --wait 原样交回 CLI（它自己会造 marker 并等），我们造的那个已经收回
+        # --merge 只给了 1 个路径（要 4 个），翻不出来 -> --wait 原样交回 CLI
+        # （它自己会造 marker 并等），我们造的那个已经收回
         self.assertEqual(self.cli_args(), '--wait --merge ' + self.a)
 
         left = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*'))) - before

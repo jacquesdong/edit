@@ -14,6 +14,7 @@
 edit <文件...>               在当前 IDE 窗口打开文件
 edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
 edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
+edit -m <文件> <文件> <base> <结果>   三向合并（VS Code 系的 --merge）
 edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
 eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -41,8 +42,9 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
    URI 里（`file:///x.py:12:3`，冒号不转义）。协议是从 `remote-cli`（`out/server-cli.js`）
    抓包对出来的，字段与它逐字节一致；回复只认 HTTP 200。
    这条路径不需要 PATH 里有 `remote-cli`，也不起 node。
-2. **remote-cli**：没有 socket（桌面版），或参数翻不了（`-g` / 未知选项 /
-   `--wait` 但没给文件 / 无参数）时，照旧找 `code` / `buddycn` / `trae-cn` 去开。
+2. **remote-cli**：没有 socket（桌面版），或参数翻不了（未知选项 / `--wait`
+   但没给文件 / `-g` `-m` 的取值没给够 / 无参数）时，照旧找 `code` / `buddycn` /
+   `trae-cn` 去开。
    直连失败也会回退到这里，并在 stderr 留一行提示。
 
 `--wait` / `-w` 也走直连：先 mkstemp 一个空 marker，把路径放进报文的
