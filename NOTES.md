@@ -111,6 +111,7 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 带 `--interactive` 时先多一步：列出窗口让你挑，把挑中的 socket 写回
 `os.environ[IPC_HOOK]`，再走上面这张图 —— 所以"当前窗口"可以是挑出来的那个，
 且回退到 CLI 时它继承的也是同一个 hook（不用先 `--init` 导入）。
+只保证**打开**，不保证那个窗口被置前（见下"打开 ≠ 激活"）。
 
 挑窗口这一步，装了 fzf 且 stdin 是 tty 就交给 fzf（`use_fzf()`）：
 
@@ -150,6 +151,31 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
 
+### 打开 ≠ 激活（已知限制，别再去找"少发了什么"）
+
+`--interactive` 挑别的 IDE 的窗口：`HTTP 200`、文件确实打开了，**但那个窗口不会被置前**。
+实测（同一个 Trae 窗口，三个不同文件，各间隔 8s）：
+
+| 方式 | 结果 |
+|---|---|
+| A 我们的直连 | 打开，不激活 |
+| B 真 CLI `buddycn <文件>` | 打开，不激活 |
+| C 真 CLI `buddycn -r <文件>` | 打开，不激活 |
+
+不是我们漏了什么：
+
+- open 报文就那 12 个字段（`type` / `fileURIs` / `folderURIs` / `diffMode` /
+  `mergeMode` / `addMode` / `removeMode` / `gotoLineMode` / `forceReuseWindow` /
+  `forceNewWindow` / `waitMarkerFilePath` / `remoteAuthority`），**没有 focus /
+  activate 之类的东西**；
+- `server-cli.js` 里 grep 不到 `focus`，发完报文就收工，没有后续动作；
+- 我们发的和它逐字节一致（fixtures 保证），此环境无 `VSCODE_CLI_AUTHORITY`，
+  `remoteAuthority` 两边都是空 —— 连唯一可能带窗口语义的字段都一样。
+
+所以置前是**客户端 / 窗口管理器**层面的事（remote 下请求还是从隧道过来的），
+服务器这边没法通过这条 socket 左右，官方 CLI 同款行为。要那个窗口到前面来，
+只能自己点过去。
+
 ## 窗口发现与 workspace
 
 - `find_sockets()`：扫 `/proc/net/unix`（只列已 bind 的，天然过滤残留 socket 文件）+
@@ -184,7 +210,8 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 2. ~~`--interactive` 选中的窗口**直接开文件**~~ 已支持：`edit --interactive <文件>`
    挑完窗口把 socket 早期写回 `os.environ[IPC_HOOK]`，四个 `current_socket()`
    调用点一行没改 —— 直连、--init 的默认值、回退 CLI 继承的环境全都跟着走。
-   不带文件、与 `--list` 冲突、取消（q / EOF）都报错退出。
+   不带文件、与 `--list` 冲突、取消（q / EOF）都报错退出。挑别的 IDE 时只打开、
+   不激活那个窗口（限制见上，与官方 CLI 一致，不用再查）。
 3. 桌面版（macOS / Linux 桌面）其实也有 `vscode-ipc-*.sock`，只是被 `find_sockets()`
    的 node 判据过滤了。放宽判据即可复用同一条直连路径。
 4. ~~回归脚本还能补：`status` 探测、`--list` / `--init` 的输出~~ 已补：`PROC` 可注入
