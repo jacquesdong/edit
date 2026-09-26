@@ -127,6 +127,8 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 - `wait_marker()`：`while exists: sleep(1s)`，间隔照抄 CLI；Ctrl-C 时先把
   marker 删掉再抛（main 那里转成 130）；
 - 翻不出来 / 发失败 / `--dry-run` 都把 marker 收回：交回 CLI 时它自己会造一个。
+- 真机验证过了（`edit --wait <文件>` 挂后台，在窗口里关掉该标签页）：窗口接受
+  带 `waitMarkerFilePath` 的报文、关文件时删掉 marker、我们退出 0 —— 不起 node。
 
 `-w` 是 `--wait` 的别名（同上源码里 `wait:{type:"boolean",alias:"w"}`）。
 `--wait` 只给目录不认（CLI 要求至少一个文件），这种就交回 CLI 让它报错。
