@@ -10,7 +10,7 @@
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
-  edit --list                  列出存活的 IDE 窗口（只读，不读 stdin）
+  edit --list                  列出存活的 IDE 窗口（只读、不读 stdin，会问各窗口 workspace）
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
@@ -43,11 +43,15 @@
 from __future__ import print_function, unicode_literals
 
 import argparse
+import json
 import os
 import re
 import shlex
 import shutil
+import socket
 import sys
+
+from concurrent.futures import ThreadPoolExecutor
 
 EDIT_CLI = 'EDIT_CLI'
 
@@ -80,8 +84,12 @@ GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 SOCK_PREFIX = 'vscode-ipc-'
 
 
-def get_ipc_hook():
-    """取 VSCODE_IPC_HOOK_CLI 环境变量
+def current_socket():
+    """当前终端所连窗口的 socket（不在 IDE 终端里时 None）
+
+    只在这里读 VSCODE_IPC_HOOK_CLI：调用方要的是"当前窗口"这个概念，而不是
+    "某个环境变量"。find_remote_cli 拿它当门控，print_sockets / ask_socket 拿它
+    标 * 和当回车默认，main --init 拿它当默认值。
     """
 
     return os.environ.get(IPC_HOOK)
@@ -122,8 +130,7 @@ def find_remote_cli():
     * 只看目录结构，不管装在哪（家目录 / 系统目录 / 容器里都认）
     """
 
-    hook = get_ipc_hook()
-    if not hook:
+    if not current_socket():
         return None
 
     path = os.environ.get('PATH')
@@ -576,28 +583,145 @@ def find_sockets():
 
     return [found[i] for i in sorted(found)]
 
+def http_body(raw):
+    """HTTP 回复 -> 正文；只处理 chunked（socket 上的回复都是这种）
+
+    >>> http_body(b'HTTP/1.1 200 OK\\r\\n\\r\\n5\\r\\nhello\\r\\n0\\r\\n\\r\\n')
+    'hello'
+    >>> http_body(b'HTTP/1.1 200 OK\\r\\n\\r\\n')                # 空正文
+    ''
+    >>> http_body(b'HTTP/1.1 200 OK\\r\\n\\r\\nnot-chunked')     # 不带分块就整段返回
+    'not-chunked'
+    """
+
+    _, _, rest = raw.partition(b'\r\n\r\n')
+
+    if not re.match(rb'^[0-9a-fA-F]+\r\n', rest):
+        return rest.decode('utf-8', 'replace')
+
+    out = []
+
+    while True:
+        line, _, rest = rest.partition(b'\r\n')
+
+        try:
+            size = int(line.split(b';')[0], 16)     # 允许 chunk 扩展
+        except ValueError:
+            break
+
+        if size == 0:
+            break
+
+        out.append(rest[:size])
+        rest = rest[size + len(b'\r\n'):]           # 跳过数据后面的 CRLF
+
+    return b''.join(out).decode('utf-8', 'replace')
+
+def parse_status(text):
+    """从 status 文本里抠出 (authority, workspace)
+
+    窗口自己的 argv 长这样：'--remote <authority> <workspace>'。本地窗口没有
+    --remote，那就两者都是 None（也就没法靠它认窗口）。
+
+    >>> parse_status('Process Argv:     --remote codebuddy-remote-ssh+xa /home/dongjq/config')
+    ('codebuddy-remote-ssh+xa', '/home/dongjq/config')
+    >>> parse_status('Process Argv:     --remote codebuddy-remote-ssh+xa')    # 没开文件夹
+    ('codebuddy-remote-ssh+xa', None)
+    >>> parse_status('Process Argv:     /usr/share/code/edit')
+    (None, None)
+    """
+
+    m = re.search(r'^Process Argv:\s*(.*)$', text, re.M)
+    if not m:
+        return None, None
+
+    m = re.search(r'--remote\s+(\S+)\s*(.*)$', m.group(1))
+    if not m:
+        return None, None
+
+    return m.group(1), m.group(2).strip() or None
+
+def socket_status(sock, timeout=1.5):
+    """直连窗口的 socket 问一次只读 status，返回 (authority, workspace)
+
+    用的就是 remote-cli 自己那套协议：POST / + JSON，回复是 chunked 的
+    JSON 字符串。任何失败（连不上 / 超时 / 解析不了）都返回 (None, None)
+    且不抛异常 —— 它在并发探测的线程里跑。
+    """
+
+    body = json.dumps({'type': 'status'}).encode()
+    req = (b'POST / HTTP/1.1\r\nHost: localhost\r\n'
+           b'content-type: application/json\r\naccept: application/json\r\n'
+           b'content-length: %d\r\nconnection: close\r\n\r\n' % len(body)) + body
+
+    chunks = []
+    total = 0
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(sock)
+
+            conn.sendall(req)
+
+            while total < (1 << 20):        # 正常 2~3KB，1MB 足够
+                data = conn.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+                total += len(data)
+    except OSError:
+        return None, None
+
+    try:
+        text = json.loads(http_body(b''.join(chunks)))
+    except ValueError:
+        return None, None
+
+    if not isinstance(text, str):
+        return None, None
+
+    return parse_status(text)
+
+def probe_workspaces(socks, timeout=1.5):
+    """并发问每个候选窗口要一次 status，把 authority / workspace 填进候选
+
+    一次 status 约 0.26s，串行 5 个窗口就得等 1.3s，所以用线程池；线程数封顶
+    8，别一下子砸一堆请求过去。socket_status 自己吞异常，某个窗口卡住最多等到
+    timeout，失败就留下 (None, None)，显示成 ?。
+    """
+
+    if not socks:
+        return
+
+    with ThreadPoolExecutor(max_workers=min(8, len(socks))) as pool:
+        futures = [pool.submit(socket_status, s['sock'], timeout) for s in socks]
+
+        for s, fut in zip(socks, futures):
+            s['authority'], s['workspace'] = fut.result()
+
 def format_sockets(socks, hook):
     """把候选渲染成表格行：--list 打印它，--init --interactive 也用它
 
     打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI。
-    和 hook 相同的那个用 * 标出来。
+    和 hook 相同的那个用 * 标出来；workspace 是问窗口要来的，问不到就是 ?。
 
     >>> s = [{'sock': '/r/vscode-ipc-a.sock', 'pid': '1',
-    ...       'install': '/i', 'cli': '/i/bin/remote-cli/buddycn'}]
+    ...       'cli': '/i/bin/remote-cli/buddycn', 'workspace': '/w/proj'}]
     >>> format_sockets(s, '/r/vscode-ipc-a.sock')[1].split()[0]
     '*'
     >>> format_sockets(s, None)[1].split()[0]
     '1'
     >>> format_sockets(s, None)[1].split()[-2:]
-    ['buddycn', '/i']
-    >>> b = [{'sock': '/r/a b.sock', 'pid': '1', 'install': '/i', 'cli': ''}]
+    ['buddycn', '/w/proj']
+    >>> b = [{'sock': '/r/a b.sock', 'pid': '1', 'cli': ''}]
     >>> " '/r/a b.sock'" in format_sockets(b, None)[1]
     True
-    >>> format_sockets(b, None)[1].split()[-2]      # cli 读不到时打 ?
-    '?'
+    >>> format_sockets(b, None)[1].split()[-2:]     # cli / workspace 都读不到
+    ['?', '?']
     """
 
-    lines = ['  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'install')]
+    lines = ['  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'workspace')]
 
     for n, s in enumerate(socks, 1):
         mark = '*' if s['sock'] == hook else ' '
@@ -605,14 +729,15 @@ def format_sockets(socks, hook):
         # shlex.quote：路径含空格时整行还能直接粘回 shell；正常路径不加引号
         lines.append('%s %2d  %-67s %-8s %-9s %s' %
                      (mark, n, shlex.quote(s['sock']), s['pid'],
-                      os.path.basename(s['cli']) or '?', s['install']))
+                      os.path.basename(s['cli']) or '?', s.get('workspace') or '?'))
 
     return lines
 
 def load_sockets(tag):
-    """取候选；不适用 / 一个都没有时按 tag 报错退出
+    """取候选并问出各自的 workspace；不适用 / 一个都没有时按 tag 报错退出
 
     tag 形如 'edit --list'、'edit --init --interactive'，只用来拼错误信息。
+    返回的候选里带 authority / workspace（探测失败就是 None）。
     """
 
     socks = find_sockets()
@@ -624,12 +749,14 @@ def load_sockets(tag):
     if not socks:
         sys.exit('%s: 没有存活的 IDE 窗口' % tag)
 
+    probe_workspaces(socks)
+
     return socks
 
 def print_sockets():
     socks = load_sockets('edit --list')
 
-    print('\n'.join(format_sockets(socks, get_ipc_hook())))
+    print('\n'.join(format_sockets(socks, current_socket())))
 
 def pick_socket(socks, answer, hook=None):
     """把用户输入解释成候选项；认不出返回 None
@@ -681,10 +808,10 @@ def ask_socket(socks):
     当前窗口，只能输编号。q / EOF / 认不出的输入都算取消。
     """
 
-    hook = get_ipc_hook()
+    current = current_socket()
 
-    sys.stderr.write('\n'.join(format_sockets(socks, hook)) + '\n')
-    if hook:
+    sys.stderr.write('\n'.join(format_sockets(socks, current)) + '\n')
+    if current:
         sys.stderr.write('选择窗口编号 [1-%d]（回车 = 当前窗口，q = 取消）: ' % len(socks))
     else:
         sys.stderr.write('选择窗口编号 [1-%d]（q = 取消）: ' % len(socks))
@@ -696,7 +823,7 @@ def ask_socket(socks):
     except EOFError:
         sys.exit('edit --init --interactive: 没读到编号（stdin 已结束）')
 
-    chosen = pick_socket(socks, answer, hook)
+    chosen = pick_socket(socks, answer, current)
     if not chosen:
         sys.exit('edit --init --interactive: 没有选中窗口')
 
@@ -754,7 +881,7 @@ def main():
 
             print_init_script(flags.init, s['sock'], cli_dir)
         else:
-            hook = get_ipc_hook()
+            hook = current_socket()
             if not hook:
                 sys.exit('edit --init: 当前终端没有 {}（请在 IDE 集成终端里生成，'
                          '或用 edit --init <shell> --interactive 挑一个窗口）'.format(IPC_HOOK))
