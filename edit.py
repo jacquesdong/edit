@@ -38,6 +38,10 @@
 把这两样原样交给 remote-cli，等于用该 IDE 自己的命令打开文件；
 因为 VS Code / CodeBuddy / Trae 是同一套 remote server，
 所以这里不需要知道当前到底是哪一个，也不需要五个不同的命令名。
+
+打开文件其实可以不走 CLI：窗口 socket 上就是个 HTTP + JSON 接口
+（{"type":"open",…} / {"type":"status"}，remote-cli 自己也是这么发的），
+所以有 socket 时直接发；桌面版没有这种 socket，才落回 remote-cli。
 """
 
 from __future__ import print_function, unicode_literals
@@ -50,6 +54,7 @@ import shlex
 import shutil
 import socket
 import sys
+import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -617,6 +622,32 @@ def http_body(raw):
 
     return b''.join(out).decode('utf-8', 'replace')
 
+def file_uri(path, line=None, col=None):
+    """路径 -> file URI；行号/列号按 VS Code 的写法拼在末尾（冒号不转义）
+
+    编码与 remote-cli 发的完全一致（空格 -> %20，非 ASCII -> UTF-8 percent）。
+    别用 pathlib 的 as_uri()：它会把 :3 的冒号也编成 %3A。
+
+    >>> file_uri('/tmp/a b.txt')
+    'file:///tmp/a%20b.txt'
+    >>> file_uri('/tmp/探 试.txt')
+    'file:///tmp/%E6%8E%A2%20%E8%AF%95.txt'
+    >>> file_uri('/tmp/a.txt', '3')
+    'file:///tmp/a.txt:3'
+    >>> file_uri('/tmp/a.txt', '3', '5')
+    'file:///tmp/a.txt:3:5'
+    """
+
+    uri = 'file://' + urllib.parse.quote(os.path.abspath(path))
+
+    if line:
+        uri += ':' + line
+
+        if col:
+            uri += ':' + col
+
+    return uri
+
 def parse_status(text):
     """从 status 文本里抠出 (authority, workspace)
 
@@ -641,15 +672,17 @@ def parse_status(text):
 
     return m.group(1), m.group(2).strip() or None
 
-def socket_status(sock, timeout=1.5):
-    """直连窗口的 socket 问一次只读 status，返回 (authority, workspace)
+def socket_request(sock, msg, timeout=1.5):
+    """往窗口 socket 发一次请求，返回原始 HTTP 回复；失败返回 None
 
-    用的就是 remote-cli 自己那套协议：POST / + JSON，回复是 chunked 的
-    JSON 字符串。任何失败（连不上 / 超时 / 解析不了）都返回 (None, None)
-    且不抛异常 —— 它在并发探测的线程里跑。
+    协议就是 remote-cli 自己那套：POST / + JSON，回复是 chunked。连不上 / 超时
+    一律返回 None 且不抛异常。
+
+    >>> socket_request('/no-such.sock', {'type': 'status'}, timeout=0.1) is None
+    True
     """
 
-    body = json.dumps({'type': 'status'}).encode()
+    body = json.dumps(msg).encode()
     req = (b'POST / HTTP/1.1\r\nHost: localhost\r\n'
            b'content-type: application/json\r\naccept: application/json\r\n'
            b'content-length: %d\r\nconnection: close\r\n\r\n' % len(body)) + body
@@ -664,17 +697,46 @@ def socket_status(sock, timeout=1.5):
 
             conn.sendall(req)
 
-            while total < (1 << 20):        # 正常 2~3KB，1MB 足够
+            while total < (1 << 20):        # status 回复 2~3KB，1MB 足够
                 data = conn.recv(65536)
                 if not data:
                     break
                 chunks.append(data)
                 total += len(data)
     except OSError:
+        return None
+
+    return b''.join(chunks)
+
+def http_code(raw):
+    """HTTP 回复的状态码；解不出来返回 0
+
+    >>> http_code(b'HTTP/1.1 200 OK\\r\\n\\r\\n')
+    200
+    >>> http_code(b'garbage')
+    0
+    """
+
+    parts = raw.split(b'\r\n', 1)[0].split()
+
+    if len(parts) > 1 and parts[1].isdigit():
+        return int(parts[1])
+
+    return 0
+
+def socket_status(sock, timeout=1.5):
+    """直连窗口 socket 问一次只读 status，返回 (authority, workspace)
+
+    任何失败（连不上 / 超时 / 解析不了）都返回 (None, None) 且不抛异常 ——
+    它在并发探测的线程里跑。
+    """
+
+    raw = socket_request(sock, {'type': 'status'}, timeout)
+    if not raw:
         return None, None
 
     try:
-        text = json.loads(http_body(b''.join(chunks)))
+        text = json.loads(http_body(raw))
     except ValueError:
         return None, None
 
@@ -682,6 +744,93 @@ def socket_status(sock, timeout=1.5):
         return None, None
 
     return parse_status(text)
+
+# 能和 open 报文一一对应的选项；其余选项（--wait / -g / 未知的）都交回 CLI
+OPEN_FLAGS = {
+    '-r': 'forceReuseWindow', '--reuse-window': 'forceReuseWindow',
+    '-n': 'forceNewWindow', '--new-window': 'forceNewWindow',
+    '-a': 'addMode', '--add': 'addMode',
+    '-d': 'diffMode', '--diff': 'diffMode',
+}
+
+def open_request(args):
+    """把命令行参数翻译成 socket 直连要发的 open 报文；翻不了返回 None
+
+    翻不了就交回 CLI：--wait / --merge / -g / 未知选项 / -- / 没给参数。
+    目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
+
+    >>> open_request(['/no-such-dir/x.py'])['fileURIs']
+    ['file:///no-such-dir/x.py']
+    >>> open_request(['/no-such-dir/x.py:3'])['gotoLineMode']
+    True
+    >>> open_request(['/no-such-dir/x.py:3:5'])['fileURIs']
+    ['file:///no-such-dir/x.py:3:5']
+    >>> open_request(['-r', '/no-such-dir/x.py'])['forceReuseWindow']
+    True
+    >>> open_request(['/'])['folderURIs']           # 目录单独放
+    ['file:///']
+    >>> open_request(['--wait', '/no-such-dir/x.py']) is None
+    True
+    >>> open_request(['-g', '/no-such-dir/x.py:3']) is None
+    True
+    >>> open_request([]) is None
+    True
+    """
+
+    msg = {
+        'type': 'open',
+        'fileURIs': [],
+        'folderURIs': [],
+        'diffMode': False,
+        'mergeMode': False,
+        'addMode': False,
+        'gotoLineMode': False,
+        'forceReuseWindow': False,
+        'forceNewWindow': False,
+    }
+
+    for a in args:
+        if a == '--':
+            return None             # 之后的参数按字面量，交回 CLI
+
+        if a.startswith('-'):
+            field = OPEN_FLAGS.get(a)
+            if not field:
+                return None         # 不认识的选项（--wait / -g / …）交回 CLI
+
+            msg[field] = True
+            continue
+
+        goto = parse_goto(a)
+
+        if goto:
+            msg['fileURIs'].append(file_uri(*goto))
+            msg['gotoLineMode'] = True
+        elif os.path.isdir(a):
+            msg['folderURIs'].append(file_uri(a))
+        else:
+            msg['fileURIs'].append(file_uri(a))
+
+    if not msg['fileURIs'] and not msg['folderURIs']:
+        return None                 # 没东西可开：保持 CLI 原来的行为
+
+    return msg
+
+def socket_open(sock, msg, timeout=3.0):
+    """把 open 报文发给窗口，返回 (ok, 详情)
+
+    判据和 CLI 一致：只认 HTTP 200（CLI 就是 JSON.parse 之后看 statusCode）。
+    详情是回复正文，失败时正好拿来当错误信息。
+    """
+
+    raw = socket_request(sock, msg, timeout)
+    if not raw:
+        return False, '连不上或超时'
+
+    code = http_code(raw)
+    detail = http_body(raw).strip()
+
+    return code == 200, detail or ('HTTP %s' % code)
 
 def probe_workspaces(socks, timeout=1.5):
     """并发问每个候选窗口要一次 status，把 authority / workspace 填进候选
@@ -912,6 +1061,23 @@ def main():
               (result.attempted, result.failed))
 
         return 1 if result.failed else 0
+
+    # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
+    # 翻不了（--wait / -g / 未知选项）或发失败，就交给下面的 CLI 路径
+    sock = current_socket()
+    msg = open_request(args) if sock else None
+
+    if msg:
+        if flags.dry_run:
+            print('socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False)))
+            return
+
+        ok, detail = socket_open(sock, msg)
+
+        if ok:
+            return
+
+        sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
 
     cli = find_cli()
     if not cli:
