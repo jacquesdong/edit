@@ -150,6 +150,21 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 `-w` 是 `--wait` 的别名（同上源码里 `wait:{type:"boolean",alias:"w"}`）。
 `--wait` 只给目录不认（CLI 要求至少一个文件），这种就交回 CLI 让它报错。
 
+### 交回别的 CLI 时把 --wait 摘掉
+
+`--wait` / `-w` 是 VS Code 系的选项（直连走 marker；交回 CLI 时它自己也认）。
+别的 CLI 没有：
+
+- vim：`vim --wait f` -> `Unknown option argument: "--wait"`，退出 1；
+- 更要命的是 `-w`：vim 里是 `-w <scriptout>`（把键入的命令追加写进文件），
+  语义相反还毁文件；
+- 好消息是终端里的 vim 本来就前台阻塞、退出才返回，等于天然在等，摘掉正好。
+  GUI 版（gvim / mvim）会 fork 后立刻返回，那种得 `-f`（foreground）—— 但本机
+  `vim -f` 退出 1、`vim -h` 里也没有，那是 GUI 版才有的开关，所以**不翻译**。
+
+于是 `drop_wait()`：kind 不是 VS Code 系就把这两个参数摘掉（`--` 之后按字面量），
+nano / emacs 以及认不出来的 CLI（kind 为 None）同样摘。
+
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
 
 ### 打开 ≠ 激活（已知限制，别再去找"少发了什么"）

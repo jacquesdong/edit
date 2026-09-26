@@ -50,6 +50,8 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
 `--wait` / `-w` 也走直连：先 mkstemp 一个空 marker，把路径放进报文的
 `waitMarkerFilePath`，窗口关掉文件时删它，我们等它消失 —— 和 `remote-cli` 同机制
 （它也是"造 marker + 每秒轮询"），所以当 `$EDITOR` / `core.editor` 用时全程不起 node。
+它是 VS Code 系的选项：交回 vim 系 CLI 时会被摘掉（vim 没有 `--wait`，`-w` 还是
+"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
 
 `--list` / `--init --interactive` 会用同一个 socket 直连问每个候选窗口一次只读
 `{"type":"status"}`，从回复的 `Process Argv: --remote <authority> <workspace>` 取得

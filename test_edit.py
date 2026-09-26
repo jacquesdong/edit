@@ -729,12 +729,33 @@ class WaitTest(EditCase):
         proc = self.run_edit('--wait', '--merge', self.a, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 被调起
-        # --merge 只给了 1 个路径（要 4 个），翻不出来 -> --wait 原样交回 CLI
-        # （它自己会造 marker 并等），我们造的那个已经收回
-        self.assertEqual(self.cli_args(), '--wait --merge ' + self.a)
+        # --merge 只给了 1 个路径（要 4 个），翻不出来 -> 交回 CLI；
+        # --wait 被摘掉了（假 CLI 不是 VS Code 系，见下），我们造的 marker 已收回
+        self.assertEqual(self.cli_args(), '--merge ' + self.a)
 
         left = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*'))) - before
         self.assertEqual(left, set(), 'marker 该被收回去')
+
+    def test_wait_dropped_for_other_cli(self):
+        """交回的 CLI 不是 VS Code 系（这里假 CLI 谁都不认）：--wait / -w 摘掉
+
+        vim 没有 --wait（实测 Unknown option argument 退出 1），-w 在 vim 里还是
+        "把键入的命令写进文件"，留着会坏事；而终端 vim 本来就前台阻塞到退出。
+        """
+
+        for flag in ('--wait', '-w'):
+            with self.subTest(flag):
+                proc = self.run_edit('--dry-run', flag, self.a)
+
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout.split(), [self.fake_cli, self.a])
+
+    def test_wait_kept_for_code_cli(self):
+        """VS Code 系认得 --wait：原样交给它（直连翻不出来时它会自己造 marker）"""
+
+        self.assertEqual(edit.drop_wait(['--wait', self.a], edit.CLI_KIND_CODE),
+                         ['--wait', self.a])
+        self.assertEqual(edit.drop_wait(['--', '--wait'], None), ['--', '--wait'])
 
     def test_wait_marker_returns_when_deleted(self):
         marker = self._touch('marker')

@@ -35,6 +35,8 @@
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
   列号只有 VS Code 系用得上，vim 系先忽略。
+  --wait / -w 同理只在 VS Code 系有意义：交回 vim 系 CLI 时会被摘掉（vim 没有
+  这个选项，-w 还是"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
 
 原理：在集成终端里 IDE 已经替你准备好两样东西
   * VSCODE_IPC_HOOK_CLI  指向本会话的窗口 socket
@@ -855,6 +857,43 @@ def wants_wait(args):
     return False
 
 
+def drop_wait(args, kind):
+    """交回的 CLI 不是 VS Code 系时，把 --wait / -w 摘掉（-- 之后按字面量）
+
+    别的 CLI 没有这个选项：vim 见到 --wait 直接 "Unknown option argument" 退出 1，
+    而 -w 在 vim 里是"把键入的命令写进 <scriptout>"，语义相反还毁文件。好在终端
+    里的 vim 本来就前台阻塞、退出才返回，等于天然在等，摘掉正好。
+
+    >>> drop_wait(['--wait', 'a.txt'], CLI_KIND_VIM)
+    ['a.txt']
+    >>> drop_wait(['-w', 'a.txt'], CLI_KIND_VIM)
+    ['a.txt']
+    >>> drop_wait(['-r', '--wait', 'a.txt'], None)      # 不认识的 CLI 也摘
+    ['-r', 'a.txt']
+    >>> drop_wait(['--wait', 'a.txt'], CLI_KIND_CODE)   # VS Code 系原样：它认得
+    ['--wait', 'a.txt']
+    >>> drop_wait(['--', '--wait'], CLI_KIND_VIM)       # -- 之后不动
+    ['--', '--wait']
+    """
+
+    if kind == CLI_KIND_CODE:
+        return list(args)
+
+    out = []
+    literal = False
+
+    for a in args:
+        if literal:
+            out.append(a)
+        elif a == '--':
+            literal = True
+            out.append(a)
+        elif a not in WAIT_FLAGS:
+            out.append(a)
+
+    return out
+
+
 def make_marker():
     """给 --wait 造一个空 marker，返回路径；造不出来返回 None
 
@@ -1433,7 +1472,8 @@ def main():
 
     # cli 是 argv 列表：[可执行文件, 自己配置里的参数...]（如 EDITOR='vim -u NONE'）
     kind = cli_kind(cli[0])
-    argv = cli + apply_goto(abspath_args(args, kind), kind)
+    # 不是 VS Code 系就摘掉 --wait / -w：它们没这个选项（vim 的 -w 还是别的意思）
+    argv = cli + apply_goto(abspath_args(drop_wait(args, kind), kind), kind)
 
     if flags.dry_run:
         # 拼成可以直接复制执行的一行（bash/fish 都认）
