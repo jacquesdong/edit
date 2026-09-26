@@ -112,6 +112,15 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 `os.environ[IPC_HOOK]`，再走上面这张图 —— 所以"当前窗口"可以是挑出来的那个，
 且回退到 CLI 时它继承的也是同一个 hook（不用先 `--init` 导入）。
 
+挑窗口这一步，装了 fzf 且 stdin 是 tty 就交给 fzf（`use_fzf()`）：
+
+- 候选行（就是 `--list` 那张表）喂 fzf 的 stdin，`--header-lines=1` 把表头固定住；
+- 它的界面走它自己的 stderr（继承终端），**我们的 stdout 留给初始化片段**，
+  选中项从它的 stdout 读回来，按行首编号反查候选项（`socket_number()`）；
+- 没选中（Esc / Ctrl-C）、认不出行、拉不起来：一律落回"列编号 + 读一行"那套，
+  行为和不装 fzf 时一模一样；
+- `EDIT_FZF=0 / off / never` 显式关（测试里必须关，否则会真拉起一个选择器）。
+
 ### `--wait` 是怎么等的
 
 `remote-cli` 的做法（`server-cli.js`，抓自本机安装目录）：

@@ -454,6 +454,8 @@ def make_proc(root, windows):
 class ProcCase(EditCase):
     """假 /proc + 假窗口：窗口发现、status 探测、--list / --init 的公共环境"""
 
+    fzf = '0'                       # 默认关掉 fzf（FzfTest 里改成 ''）
+
     def setUp(self):
         super().setUp()
         self.sock1 = os.path.join(self.dir, 'vscode-ipc-1.sock')
@@ -479,6 +481,8 @@ class ProcCase(EditCase):
         out, err = StringIO(), StringIO()
         env = dict(os.environ)
         env.pop(edit.IPC_HOOK, None)
+        # 关掉 fzf：测试不该真拉起一个选择器（要测它的话自己打 use_fzf 的补丁）
+        env[edit.EDIT_FZF] = self.fzf
 
         if hook is not None:
             env[edit.IPC_HOOK] = hook
@@ -786,6 +790,124 @@ class InteractiveOpenTest(ProcCase):
         _, _, code = self.run_main('--interactive', '--list', self.a)
 
         self.assertIn('冲突', code)
+
+
+class FzfTest(ProcCase):
+    """--interactive 有 fzf 时用它挑窗口（这里把 fzf 换成假的 subprocess.run）"""
+
+    def setUp(self):
+        super().setUp()
+        self.w1 = self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.w2 = self.add_window(path=self.sock2, body=status_body('/w/other'))
+
+    def opens(self, win):
+        return [m for m in win.requests if m.get('type') == 'open']
+
+    def run_fzf(self, out, code=0, answer='1'):
+        """假 fzf 返回 out（code != 0 = 被取消），返回它收到的参数"""
+
+        seen = {}
+
+        def fake(argv, **kw):
+            seen['argv'] = argv
+            seen['input'] = kw.get('input')
+
+            return subprocess.CompletedProcess(argv, code, out, '')
+
+        with patch.object(edit, 'use_fzf', lambda: True), \
+                patch('subprocess.run', fake):
+            self.out, self.err, self.code = self.run_main('--interactive', self.a,
+                                                          answer=answer)
+
+        return seen
+
+    def test_selects_line(self):
+        """选中 2 号那行 -> 开在 2 号窗口（行首编号反查候选项）"""
+
+        lines = edit.format_sockets(self.candidates(), None)
+        seen = self.run_fzf(lines[2] + '\n')
+
+        self.assertEqual(seen['argv'][0], 'fzf')
+        self.assertIn('--header-lines=1', seen['argv'])
+        self.assertIn(self.sock1, seen['input'])
+        self.assertEqual(self.opens(self.w1), [], '1 号不该被打开')
+        self.assertEqual(self.opens(self.w2)[-1]['fileURIs'], ['file://' + self.a])
+
+    def test_cancel_falls_back(self):
+        """Esc / Ctrl-C（fzf 非 0 退出）-> 落到编号输入，不直接退出"""
+
+        self.run_fzf('', code=130, answer='1')
+
+        self.assertEqual(self.code, 0)
+        self.assertIn('选择窗口编号', self.err)
+        self.assertEqual(self.opens(self.w1)[-1]['fileURIs'], ['file://' + self.a])
+        self.assertEqual(self.opens(self.w2), [])
+
+    def test_unparsable_line_falls_back(self):
+        """选中的行认不出编号 -> 同样落到编号输入"""
+
+        self.run_fzf('garbage\n', code=0, answer='1')
+
+        self.assertIn('选择窗口编号', self.err)
+        self.assertEqual(self.opens(self.w1)[-1]['fileURIs'], ['file://' + self.a])
+
+    def test_stdout_stays_clean(self):
+        """fzf 的界面走 stderr：stdout 仍只留给 --init 的片段"""
+
+        self.run_fzf(edit.format_sockets(self.candidates(), None)[2] + '\n')
+
+        self.assertEqual(self.out, '')
+
+    def test_not_used_when_off(self):
+        """EDIT_FZF=0：根本不拉 fzf"""
+
+        def boom(*a, **kw):
+            raise AssertionError('不该拉起 fzf')
+
+        with patch('subprocess.run', boom):
+            self.out, self.err, self.code = self.run_main('--interactive', self.a,
+                                                          answer='2')
+
+        self.assertEqual(self.opens(self.w1), [])
+        self.assertEqual(self.opens(self.w2)[-1]['fileURIs'], ['file://' + self.a])
+
+
+class UseFzfTest(unittest.TestCase):
+    """use_fzf：显式关掉 / stdin 不是 tty / 没装 fzf 都不用"""
+
+    def env(self, **over):
+        env = {k: v for k, v in os.environ.items() if k != edit.EDIT_FZF}
+        env.update(over)
+
+        return env
+
+    def patched(self, env, isatty, has_fzf):
+        stdin = patch('sys.stdin')
+        which = patch.object(edit.shutil, 'which', lambda n: '/bin/fzf' if has_fzf else None)
+
+        return patch.dict(os.environ, env, clear=True), stdin, which
+
+    def check(self, env, isatty, has_fzf, want):
+        envp, stdin, which = self.patched(env, isatty, has_fzf)
+
+        with envp, stdin as s, which:
+            s.isatty.return_value = isatty
+
+            self.assertEqual(edit.use_fzf(), want)
+
+    def test_off_values(self):
+        for off in ('0', 'off', 'never'):
+            with self.subTest(off):
+                self.check(self.env(**{edit.EDIT_FZF: off}), True, True, False)
+
+    def test_needs_tty(self):
+        self.check(self.env(), False, True, False)
+
+    def test_needs_fzf(self):
+        self.check(self.env(), True, False, False)
+
+    def test_on(self):
+        self.check(self.env(), True, True, True)
 
 
 class InitTest(ProcCase):

@@ -18,6 +18,7 @@
                                    （普通终端里没有 hook 时用这个）
   edit --interactive <文件...>     列出窗口并挑一个，在挑中的那个里打开文件
                                    （普通终端里没有 hook、又想指定窗口时用这个）
+                                   （装了 fzf 就用它挑；EDIT_FZF=0 关掉，改输编号）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -62,6 +63,7 @@ import re
 import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -70,6 +72,9 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 EDIT_CLI = 'EDIT_CLI'
+
+# 挑窗口时不想用 fzf 就设成 0 / off / never（脚本、测试）
+EDIT_FZF = 'EDIT_FZF'
 
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
 
@@ -1150,6 +1155,76 @@ def pick_socket(socks, answer, hook=None):
 
     return socks[n - 1]
 
+def socket_number(line):
+    """fzf 选中的那一行 -> 编号字符串（喂给 pick_socket）；认不出返回 ''
+
+    format_sockets 的行首是 '*' 或编号，所以取第一个数字就行；
+    认不出时返回 ''，好让调用方去走编号输入那条路（'' 在 pick_socket 里
+    是"回车 = 当前窗口"，不能当"没选中"用）。
+
+    >>> socket_number('  2  /run/a.sock buddycn /w/proj')
+    '2'
+    >>> socket_number('* 2  /run/a.sock buddycn /w/proj')
+    '2'
+    >>> socket_number('  #   socket pid cli workspace')     # 表头行
+    ''
+    >>> socket_number('')
+    ''
+    """
+
+    for tok in line.split():
+        if tok == '*':
+            continue
+
+        return tok if tok.isdigit() else ''
+
+    return ''
+
+
+def use_fzf():
+    """挑窗口时该不该用 fzf：没被关掉、有 fzf、且 stdin 是 tty
+
+    stdin 不是 tty 就不用（printf '3\\n' | edit --interactive 是脚本用法，
+    而且 fzf 要独占终端）；EDIT_FZF=0 / off / never 显式关掉。
+    不写 doctest：它看的是当前终端和 PATH。
+    """
+
+    if os.environ.get(EDIT_FZF, '') in ('0', 'off', 'never'):
+        return False
+
+    return sys.stdin.isatty() and bool(shutil.which('fzf'))
+
+
+def fzf_pick(socks):
+    """用 fzf 挑一个窗口：返回候选项；没选中 / 认不出 / 拉不起来就返回 None
+
+    候选行喂给 fzf 的 stdin，它的 UI 走自己的 stderr（继承终端）—— 我们的
+    stdout 要留给 --init 的初始化片段，不能让选择器写进来；选中项从 fzf 的
+    stdout 读。没选中（Esc / Ctrl-C）和拉不起来都返回 None，由 ask_socket
+    落到编号输入那条路。
+    """
+
+    lines = format_sockets(socks, current_socket())
+
+    try:
+        # --header-lines=1：表头那行固定住，不参与过滤
+        proc = subprocess.run(['fzf', '--prompt=窗口> ', '--height=40%',
+                               '--layout=reverse', '--header-lines=1'],
+                              input='\n'.join(lines) + '\n',
+                              stdout=subprocess.PIPE, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    n = socket_number(proc.stdout)
+    if not n:
+        return None
+
+    return pick_socket(socks, n)
+
+
 def ask_socket(socks):
     """列出候选并让用户挑一个，返回候选项
 
@@ -1160,9 +1235,17 @@ def ask_socket(socks):
 
     --init 之外也能挑（edit --interactive <文件>）：挑完由 main 把 socket
     写回环境，之后打开文件就走那个窗口。
+
+    有 fzf 时先用它（use_fzf()）：它的 UI 走 stderr，不碰留给片段的 stdout。
+    它没选中就落回下面这套编号输入 —— 所以两种挑法的行为是一致的。
     """
 
     current = current_socket()
+
+    if use_fzf():
+        picked = fzf_pick(socks)
+        if picked:
+            return picked
 
     sys.stderr.write('\n'.join(format_sockets(socks, current)) + '\n')
     if current:
@@ -1175,11 +1258,11 @@ def ask_socket(socks):
         # input 不带 prompt：它的 prompt 写 stdout，会把片段流弄脏
         answer = input()
     except EOFError:
-        sys.exit('edit --init --interactive: 没读到编号（stdin 已结束）')
+        sys.exit('edit --interactive: 没读到编号（stdin 已结束）')
 
     chosen = pick_socket(socks, answer, current)
     if not chosen:
-        sys.exit('edit --init --interactive: 没有选中窗口')
+        sys.exit('edit --interactive: 没有选中窗口')
 
     return chosen
 

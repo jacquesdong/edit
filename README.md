@@ -23,7 +23,14 @@ edit --usage                 打印完整用法（--help 是透传给 IDE CLI �
 
 edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                  （普通终端里没有 hook 时用这个）
+edit --interactive <文件...>     挑一个窗口，在挑中的那个里打开文件
+
+EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本来就是编号）
 ```
+
+挑窗口（`--interactive`）时，装了 fzf 且 stdin 是终端就用 fzf 过滤；fzf 没选中
+（Esc / Ctrl-C）会落回"列编号 + 读一行"那套，行为不变。fzf 的界面走 stderr，
+所以 `edit --init fish --interactive | source` 拿到的 stdout 仍然只有初始化片段。
 
 `edit.py` 开头的 docstring 是完整的用法与原理说明，`edit --usage` 打的就是它。
 
