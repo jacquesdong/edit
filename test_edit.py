@@ -277,10 +277,10 @@ class SocketOpenTest(EditCase):
 
 
 class GotoTest(EditCase):
-    """-g / --goto：取值就是跳转目标（CLI 也是无条件按冒号拆，见 open-goto-short）"""
+    """-g / --goto / --goto=X 被忽略：行号只认位置参数写法（报文见 open-goto-short）"""
 
     def test_forms(self):
-        """-g X / --goto X / --goto=X 三种写法等价，且 :3 不被转义成 %3A"""
+        """三种写法都按位置参数处理：等价，且 :3 不被转义成 %3A"""
 
         want = ['file://' + self.a + ':3']
 
@@ -294,19 +294,31 @@ class GotoTest(EditCase):
                 self.assertEqual(msg['gotoLineMode'], True)
 
     def test_without_line(self):
-        """取值没有行号：只置 gotoLineMode，URI 不加冒号"""
+        """取值没有行号：就是个普通文件（-g 不带来任何东西）"""
 
         msg = edit.open_request(['-g', self.a])
 
         self.assertEqual(msg['fileURIs'], ['file://' + self.a])
-        self.assertEqual(msg['gotoLineMode'], True)
+        self.assertEqual(msg['gotoLineMode'], False)
 
-    def test_missing_value_falls_back(self):
-        """-g 后面没取值、或取值又是个选项：交回 CLI 让它自己报错"""
+    def test_flag_is_ignored(self):
+        """-g / --goto 不消费参数、也不留下 token：后面是选项就等于没有它"""
+
+        self.assertEqual(edit.normalize(['-g']), [])
+        self.assertEqual(edit.normalize(['--goto']), [])
+        self.assertEqual(edit.normalize(['-g', '-r', self.a + ':3']),
+                         [('opt', '-r', 'forceReuseWindow', []),
+                          ('goto', self.a, '3', None)])
 
         for args in (['-g'], ['-g', '-r'], ['-r', '-g']):
             with self.subTest(args):
                 self.assertIsNone(edit.open_request(args))
+
+    def test_inline_value_is_a_plain_argument(self):
+        """--goto=X 的 X 是内联值：当字面路径（--goto=-r 就是文件 -r）"""
+
+        self.assertEqual(edit.normalize(['--goto=-r']), [('file', '-r')])
+        self.assertEqual(edit.normalize(['--goto=']), [])
 
     def test_mixes_with_flags(self):
         msg = edit.open_request(['-r', '-g', self.a + ':3'])
@@ -391,13 +403,13 @@ class CliArgvTest(EditCase):
     """CLI 后端：同一份 token 按 kind 翻译成不同的命令行"""
 
     def test_goto_per_kind(self):
-        """行号：code 插 --goto，vim 用 +行号 前置，认不出的原样"""
+        """行号：code 插 --goto，vim 用 +行号 前置，认不出的只传文件"""
 
         arg = 'a.txt:12'
 
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_CODE), ['--goto', arg])
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_VIM), ['+12', 'a.txt'])
-        self.assertEqual(edit.cli_argv([arg], None), [arg])
+        self.assertEqual(edit.cli_argv([arg], None), ['a.txt'])
 
     def test_column_per_kind(self):
         """列号：nano 用逗号、emacs 系用冒号、vim 不带（只有 vim 不带列）"""
@@ -408,10 +420,10 @@ class CliArgvTest(EditCase):
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_VIM), ['+12', 'a.txt'])
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_NANO), ['+12,3', 'a.txt'])
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_EMACS), ['+12:3', 'a.txt'])
-        self.assertEqual(edit.cli_argv([arg], None), [arg])
+        self.assertEqual(edit.cli_argv([arg], None), ['a.txt'])
 
     def test_column_with_goto_flag(self):
-        """-g 的取值带列：走同一个翻译（split_goto 已经把列拆出来了）"""
+        """-g 的取值带列：走位置参数那套，列号照样翻出来"""
 
         self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], edit.CLI_KIND_NANO),
                          ['+12,3', 'a.txt'])
@@ -431,14 +443,13 @@ class CliArgvTest(EditCase):
                                  ['+12', 'a.txt'])
                 self.assertEqual(edit.cli_argv(['--wait', 'a.txt'], kind), ['a.txt'])
 
-    def test_goto_flag_wins(self):
-        """已经有 -g / --goto 就不再插一个（CLI 自己认得）"""
+    def test_goto_flag_is_ignored(self):
+        """-g / --goto / --goto=X 被忽略：code 系照样插入自己的 --goto"""
 
-        for flag in ('-g', '--goto', '--goto=a.txt:12'):
-            with self.subTest(flag):
-                args = [flag] if '=' in flag else [flag, 'a.txt:12']
-
-                self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+        for args in (['-g', 'a.txt:12'], ['--goto', 'a.txt:12'], ['--goto=a.txt:12']):
+            with self.subTest(args):
+                self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE),
+                                 ['--goto', 'a.txt:12'])
 
     def test_goto_flag_translated_for_vim(self):
         """vim 系不认 -g：按 +行号 翻一遍（vim -g 是启动 GUI，会 E25 报错退出 2）"""
@@ -458,14 +469,15 @@ class CliArgvTest(EditCase):
                 self.assertEqual(edit.cli_argv(['-g', 'a.txt'], kind), ['a.txt'])
                 self.assertEqual(edit.cli_argv(['--goto=a.txt'], kind), ['a.txt'])
 
-    def test_goto_flag_no_longer_blocks_position_goto(self):
-        """vim 系下 -g 不再压制位置参数的翻译（code 系照旧压制，别插第二个 --goto）"""
+    def test_many_targets_each_get_their_own_goto(self):
+        """多个目标各插一份 --goto：实测 CLI 的 -g 可重复，报文是累加的"""
 
         args = ['a.txt:3', '-g', 'b.txt:9']
 
         self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_VIM),
                          ['+3', 'a.txt', '+9', 'b.txt'])
-        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE),
+                         ['--goto', 'a.txt:3', '--goto', 'b.txt:9'])
 
     def test_unknown_options_keep_their_place(self):
         """认不出的原样透传，而且位置不变（回退时交给 CLI 的就是它）"""
@@ -491,7 +503,7 @@ class CliArgvTest(EditCase):
                          ['--', '-w', 'a.txt:3'])
 
     def test_future_remote_cli_like_code(self):
-        """remote-cli 里的新产品名也按 code 系：-g 必须原样保留"""
+        """remote-cli 里的新产品名也按 code 系：行号翻成 --goto"""
 
         install = os.path.join(self.dir, 'future-ide')
         cli_dir = os.path.join(install, 'bin', 'remote-cli')
@@ -507,7 +519,7 @@ class CliArgvTest(EditCase):
         self.assertEqual(kind, edit.CLI_KIND_CODE)
 
         arg = 'a.txt:12:3'
-        self.assertEqual(edit.cli_argv(['-g', arg], kind), ['-g', arg])
+        self.assertEqual(edit.cli_argv(['-g', arg], kind), ['--goto', arg])
 
 
 class CliKindTest(EditCase):
@@ -545,7 +557,7 @@ class CliKindTest(EditCase):
 
         self.assertFalse(edit.have_remote_cli(os.path.dirname(cli)))
         self.assertIsNone(edit.cli_kind(cli))
-        self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], None), ['a.txt:12:3'])
+        self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], None), ['a.txt'])
 
     def test_node_must_be_executable(self):
         cli = self.make_install(mode=0o644)
@@ -640,15 +652,15 @@ class DryRunTest(EditCase):
         self.assertEqual(self.win.requests, [])
 
     def test_cli_line(self):
-        """没有 socket 时交回 CLI：判不出是哪一类的 CLI 不认 -g，只留跳转目标"""
+        """没有 socket 时交回 CLI：判不出是哪一类就不认行号，只传文件"""
 
         proc = self.run_edit('--dry-run', '-g', self.a + ':3')
 
         self.assertEqual(proc.stdout.split()[0], self.fake_cli)
-        self.assertEqual(proc.stdout.split()[1:], [self.a + ':3'])
+        self.assertEqual(proc.stdout.split()[1:], [self.a])
 
     def test_cli_line_code_kind(self):
-        """假 CLI 改叫 buddycn（判成 code 系，自己认 -g）：原样递过去"""
+        """假 CLI 改叫 buddycn（判成 code 系）：按 code 的写法插 --goto"""
 
         code_cli = os.path.join(self.dir, 'buddycn')
 
@@ -660,7 +672,8 @@ class DryRunTest(EditCase):
 
         proc = self.run_edit('--dry-run', '-g', self.a + ':3')
 
-        self.assertEqual(proc.stdout.split(), [code_cli, '-g', self.a + ':3'])
+        self.assertEqual(proc.stdout.split(),
+                         [code_cli, '--goto', self.a + ':3'])
 
 
 class FallbackTest(EditCase):

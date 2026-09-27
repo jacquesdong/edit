@@ -28,18 +28,21 @@
   CLI 自己会复用当前窗口；server 端（<安装目录>/bin/remote-cli/*）必须有
   VSCODE_IPC_HOOK_CLI，否则 CLI 直接拒绝执行，那种场景才需要 --init。
 
-  行号认两种写法：位置参数 文件:行号，以及 -g / --goto 的取值。
-  此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI；其中 -g 带 1 个取值、
-  -m / --merge 带 4 个（path1 path2 base result），取值不够就交回 CLI 报错。
+  行号只认位置参数的 文件:行号 写法：-g / --goto / --goto=X 被直接忽略（edit 对带
+  行号的参数本来就跳转，所以 -g f:3 与 f:3 完全等价）。-g / --goto 不消费后面的
+  参数（-g -r f:3 里 -r 仍是选项），--goto=X 的 X 当字面路径（--goto=-r 就是文件
+  -r；空值忽略）。此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI；其中
+  -m / --merge 带 4 个取值（path1 path2 base result），取值不够就交回 CLI 报错。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
-  vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
+  vim 系保持相对路径。其余 CLI（ed 等）不认识行号，只传文件。
   列号：VS Code 系 --goto 文件:行:列，emacs 系 +N:M，nano +N,M（都是 1 起），
   vim 不支持（只用 +N）。
   --wait / -w 同理只在 VS Code 系有意义：交回 vim 系 CLI 时会被摘掉（vim 没有
   这个选项，-w 还是"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
-  -g / --goto 也一样只在 VS Code 系成立：交回 vim 系时翻译成 +行号（不能摘，它带着
-  取值；vim -g 是启动 GUI，会 E25 报错），认不出是哪一类的 CLI 只留跳转目标。
+  行号只在交回别的 CLI 时才需要翻译：code 系 --goto 文件:行:列（一个目标一份），
+  vim 系 +行号。所以绝不能把 -g 原样透传过去：vim -g 是启动 GUI 会 E25
+  报错、emacs -g 是 --geometry 会吃掉后面的文件名、nano -g 是 --showcursor。
 
 原理：在集成终端里 IDE 已经替你准备好两样东西
   * VSCODE_IPC_HOOK_CLI  指向本会话的窗口 socket
@@ -90,7 +93,7 @@ VIM_LIKE = ('vim', 'nvim', 'vi',)
 
 # 命令行工具分类
 #
-# VS Code 系，使用 -g/--goto 跳转
+# VS Code 系，写它自己的命令行时用 --goto 跳转
 # vim 系, 使用 +行号 跳转
 # nano / emacs 系同样用 +行号，单开一类是因为列号写法不同（见 EMIT）
 CLI_KIND = {}
@@ -113,7 +116,7 @@ for i in ('emacs', 'emacsclient'):       # 当 $EDITOR 用的是后者
     CLI_KIND[i] = CLI_KIND_EMACS
 
 # file:行[:列]：只有末尾的数字才算行列号，非贪婪的 (.+?) 把冒号让给文件名，
-# 所以文件名里带冒号也解析得动（split_goto 用，对应 -g / --goto 的取值）
+# 所以文件名里带冒号也解析得动（parse_goto 靠它，split_goto 是它的一步）
 GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
 # server 端窗口 socket 的文件名前缀（/run/user/<uid>/vscode-ipc-<uuid>.sock），
@@ -330,9 +333,9 @@ def cli_kind(cli):
     """判断 cli 属于哪一类，决定 file:行号 用哪种写法
 
     先比 basename；名字不在表里、但路径符合 server 端 remote-cli 结构时，也按
-    VS Code 系处理（新产品名不必进白名单）。-g 只对 VS Code 系成立；对 vim 系
-    还是有害的（vim -g 是启动 GUI、emacs -g 是 --geometry 会吃掉后面的文件名、
-    nano -g 是 --showcursor）。其余 CLI 返回 None，按"不认行号"处理。
+    VS Code 系处理（新产品名不必进白名单）。判错就是翻错写法：给 vim 递 --goto
+    （`vim --goto` 直接不认）、给 VS Code 递 +行号，`--wait` 也会留错（见 EMIT）。
+    其余 CLI 返回 None，按"不认行号"处理。
 
     >>> cli_kind('/opt/ide/bin/remote-cli/buddycn')
     'code'
@@ -362,9 +365,8 @@ def cli_kind(cli):
 def split_goto(arg):
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
-    和 parse_goto 的差别：不做"真实文件优先"的判断。给 -g / --goto 用 ——
-    它的取值明摆着是跳转目标，CLI 也是无条件按冒号拆的（fixtures 的
-    open-goto-flag 里 /tmp/a.txt 是存在的，URI 照样是 file:///tmp/a.txt:3）。
+    和 parse_goto 的差别：不做"真实文件优先"的判断。parse_goto 靠它把行号/列号
+    拆出来 —— 只有 parse_goto 这一个调用点，所以"文件名带冒号"的取舍收在那里。
 
     >>> split_goto('no-such-file.py:12')
     ('no-such-file.py', '12', None)
@@ -416,7 +418,9 @@ def parse_goto(arg):
     return split_goto(arg)
 
 def goto_target(goto):
-    """(文件, 行号, 列号) 拼回 --goto 的取值
+    """(文件, 行号, 列号) 拼回 文件:行:列
+
+    只给 code 系用：作 `--goto` 的取值（每个目标一份，实测 CLI 的 `-g` 可重复）。
 
     存在的文件转成绝对路径：remote-cli 是把请求转给 server 的代理，
     相对路径未必按当前 shell 的 cwd 解释。
@@ -728,65 +732,92 @@ def socket_status(sock, timeout=1.5):
 
     return parse_status(text)
 
-# 认识的参数：flag -> (field, arity, category)
-# flag:     命令行选项
+# 认识的参数：flag -> (field, arity)
+# flag:  命令行选项
+# field: 报文字段
+# arity: 取值个数（0 = 开关，不带值）
 #
-# field:    报文字段
-# arity:    取值个数
-# category: 取值种类
-#
-# 取值种类：None = 开关（不带值）；'goto' = 跳转目标，无条件按 :行号[:列] 拆；
-# 'path' = 普通路径，原样不拆冒号（merge 的四个路径就是这种）。
-#
+# -g / --goto / --goto=X 不在这里：它们只是"下一个参数是跳转目标"的提示，而 edit 对
+# 任何 文件:行号 参数本来就跳转，所以直接忽略（见 normalize）。
 OPTIONS = {
-    '-r': ('forceReuseWindow', 0, None), '--reuse-window': ('forceReuseWindow', 0, None),
-    '-n': ('forceNewWindow', 0, None), '--new-window': ('forceNewWindow', 0, None),
-    '-a': ('addMode', 0, None), '--add': ('addMode', 0, None),
-    '-d': ('diffMode', 0, None), '--diff': ('diffMode', 0, None),
-    '-g': ('gotoLineMode', 1, 'goto'), '--goto': ('gotoLineMode', 1, 'goto'),
-    '-m': ('mergeMode', 4, 'path'), '--merge': ('mergeMode', 4, 'path'),
-    '--wait': ('wait', 0, None), '-w': ('wait', 0, None),
+    '-r': ('forceReuseWindow', 0), '--reuse-window': ('forceReuseWindow', 0),
+    '-n': ('forceNewWindow', 0), '--new-window': ('forceNewWindow', 0),
+    '-a': ('addMode', 0), '--add': ('addMode', 0),
+    '-d': ('diffMode', 0), '--diff': ('diffMode', 0),
+    '-m': ('mergeMode', 4), '--merge': ('mergeMode', 4),
+    '--wait': ('wait', 0), '-w': ('wait', 0),
 }
 
 
-def tokenize(args):
+def arg_token(a):
+    """一个普通参数 -> token：位置参数那套判断（跳转目标 / 目录 / 文件）
+
+    行号只认这种写法，所以 parse_goto 是"是否跳转"的唯一裁判。
+
+    >>> arg_token('no-such-file.py:12')
+    ('goto', 'no-such-file.py', '12', None)
+    >>> arg_token('no-such-file.py')
+    ('file', 'no-such-file.py')
+    >>> arg_token('/tmp')
+    ('folder', '/tmp')
+    """
+
+    goto = parse_goto(a)
+
+    if goto:
+        return ('goto',) + goto
+
+    if os.path.isdir(a):
+        return ('folder', a)
+
+    return ('file', a)
+
+
+def normalize(args):
     """命令行 -> token 列表：只扫一次，后面两个翻译后端都吃它
 
     token 是 tuple：
-    - token[0]  token 种类：'opt' / 'goto' / 'file' / 'folder' / 'other'
-        ('opt', flag, field, category, values, orig)
-            flag     选项字面量
-            field    报文字段
-            category 取值种类，见 OPTIONS 的第三列：None / 'goto' / 'path'
-            values   取值列表：[value...]，开关选项是 []（不带值）
-            orig     选项原文（原字符串）
-        ('goto', file, line, column)    文件:行号[:列]
-        ('file', path)
-        ('folder', path)
-        ('other', orig)              认不出来的：不认识的选项、取值不够的选项
+    - ('opt', flag, field, values)   认得的选项 + 它的取值（开关选项是 []）
+    - ('goto', file, line, column)   文件:行号[:列]
+    - ('file', path)
+    - ('folder', path)
+    - ('other', orig)                认不出来的：不认识的选项、取值不够的选项、
+                                     -- 之后的字面量
+
+    -g / --goto / --goto=X 只是"下一个参数是跳转目标"的提示，而 edit 对任何带行号的
+    参数本来就置 gotoLineMode，所以它们被忽略：
+
+    * -g / --goto 不消费参数 —— 后面那个参数自己按位置参数处理（所以 `-g -r f:3`
+      里 -r 仍然是选项，不是"-g 的取值"）；
+    * --goto=X 的 X 是内联值（不可能与选项混淆），一律当字面路径走位置参数那套
+      判断：`--goto=-r` 就是文件 -r，空值（`--goto=`）忽略。
 
     认不出来的一律整成 ('other', 原文) 而不是丢掉：socket 后端见它就交回 CLI，
     CLI 后端原样吐回去 —— 顺序和原文一字不改，因为回退时交给 CLI 的就是它。
 
-    >>> tokenize(['-r', 'a.txt'])
-    [('opt', '-r', 'forceReuseWindow', None, [], None), ('file', 'a.txt')]
-    >>> tokenize(['--wait'])
-    [('opt', '--wait', 'wait', None, [], None)]
-    >>> tokenize(['-g', 'a.txt:3:4'])
-    [('opt', '-g', 'gotoLineMode', 'goto', ['a.txt:3:4'], None)]
-    >>> tokenize(['--goto=a.txt:3'])
-    [('opt', '--goto', 'gotoLineMode', 'goto', ['a.txt:3'], '--goto=a.txt:3')]
-    >>> tokenize(['a.txt:3'])
+    >>> normalize(['-r', 'a.txt'])
+    [('opt', '-r', 'forceReuseWindow', []), ('file', 'a.txt')]
+    >>> normalize(['--wait'])
+    [('opt', '--wait', 'wait', [])]
+    >>> normalize(['a.txt:3'])
     [('goto', 'a.txt', '3', None)]
-    >>> tokenize(['a.txt'])
-    [('file', 'a.txt')]
-    >>> tokenize(['/tmp'])
+    >>> normalize(['/tmp'])
     [('folder', '/tmp')]
-    >>> tokenize(['-g'])                    # 取值不够
-    [('other', '-g')]
-    >>> tokenize(['-m', 'a', '-r', 'b'])    # 取值又是个选项
-    [('other', '-m'), ('file', 'a'), ('opt', '-r', 'forceReuseWindow', None, [], None), ('file', 'b')]
-    >>> tokenize(['--', 'a.txt:3'])         # -- 之后按字面量
+    >>> normalize(['-g', 'a.txt:3:4'])       # -g 被忽略，取值按位置参数走
+    [('goto', 'a.txt', '3', '4')]
+    >>> normalize(['--goto=a.txt:3'])        # 内联写法同理
+    [('goto', 'a.txt', '3', None)]
+    >>> normalize(['-g'])                    # 没取值：选项被忽略
+    []
+    >>> normalize(['-g', '-r', 'a.txt:3'])   # -g 不消费参数，-r 仍是选项
+    [('opt', '-r', 'forceReuseWindow', []), ('goto', 'a.txt', '3', None)]
+    >>> normalize(['--goto=-r'])             # 内联值当字面路径
+    [('file', '-r')]
+    >>> normalize(['--goto='])               # 空值：忽略
+    []
+    >>> normalize(['-m', 'a', '-r', 'b'])    # 取值不够 / 取值又是个选项
+    [('other', '-m'), ('file', 'a'), ('opt', '-r', 'forceReuseWindow', []), ('file', 'b')]
+    >>> normalize(['--', 'a.txt:3'])         # -- 之后按字面量
     [('other', '--'), ('other', 'a.txt:3')]
     """
 
@@ -807,30 +838,25 @@ def tokenize(args):
             out.append(('other', a))
             continue
 
+        if a in ('-g', '--goto'):
+            continue                    # 提示而已：不产出 token，也不消费参数
+
+        if a.startswith('--goto='):
+            value = a[len('--goto='):]
+
+            if value:                   # 空值忽略
+                out.append(arg_token(value))
+
+            continue
+
         if a.startswith('-'):
-            flag = a
-            inline = None
-
-            if '=' in a:
-                head, _, inline = a.partition('=')
-
-                if head == '--goto':    # 只有它支持 --goto=X 这种写法
-                    flag = head
-                else:
-                    inline = None       # 别家的 --x=y 我们不拆
-
-            spec = OPTIONS.get(flag)
+            spec = OPTIONS.get(a)
 
             if not spec:
                 out.append(('other', a))
                 continue
 
-            field, arity, category = spec
-
-            if inline is not None:
-                out.append(('opt', flag, field, category, [inline], a))
-                continue
-
+            field, arity = spec
             values = args[i:i + arity]
 
             if len(values) < arity or any(v.startswith('-') for v in values):
@@ -838,55 +864,24 @@ def tokenize(args):
                 continue
 
             i += arity
-            out.append(('opt', flag, field, category, values, None))
+            out.append(('opt', a, field, values))
             continue
 
-        goto = parse_goto(a)
-
-        if goto:
-            out.append(('goto',) + goto)
-        elif os.path.isdir(a):
-            out.append(('folder', a))
-        else:
-            out.append(('file', a))
+        out.append(arg_token(a))
 
     return out
 
 
-def has_goto_flag(tokens):
-    """命令行里已经写了 -g / --goto：CLI 自己认，我们别再插一个
-
-    连 -- 之后的 -g 也算（原来就是整条命令行扫一遍，保持原样）。
-
-    >>> has_goto_flag(tokenize(['-g', 'a.txt:12']))
-    True
-    >>> has_goto_flag(tokenize(['--', '-g', 'a.txt:12']))
-    True
-    >>> has_goto_flag(tokenize(['a.txt:12']))
-    False
-    """
-
-    for t in tokens:
-        if t[0] == 'opt' and t[3] == 'goto':
-            return True
-
-        if t[0] == 'other' and (t[1] in ('-g', '--goto')
-                                or t[1].startswith('--goto=')):
-            return True
-
-    return False
-
-
 def has_wait(tokens):
-    """token 里有没有 --wait / -w（-- 之后的不算：tokenize 已把它整成 other）
+    """token 里有没有 --wait / -w（-- 之后的不算：normalize 已把它整成 other）
 
-    >>> has_wait(tokenize(['--wait', 'a.txt']))
+    >>> has_wait(normalize(['--wait', 'a.txt']))
     True
-    >>> has_wait(tokenize(['-w', 'a.txt']))
+    >>> has_wait(normalize(['-w', 'a.txt']))
     True
-    >>> has_wait(tokenize(['a.txt']))
+    >>> has_wait(normalize(['a.txt']))
     False
-    >>> has_wait(tokenize(['--', '--wait']))
+    >>> has_wait(normalize(['--', '--wait']))
     False
     """
 
@@ -948,12 +943,11 @@ def open_request(args, marker=None):
     翻不了就交回 CLI：未知选项 / -- / 取值不够 / 没给参数。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
 
-    -g / --goto 也认（取值形式：-g X / --goto X / --goto=X）：取值原样拼进
-    fileURIs 并置 gotoLineMode，和 CLI 发的那份一致。取值本身不再过
-    parse_goto —— 它就是个跳转目标，不存在的文件也要带得上行号。
+    -g / --goto / --goto=X 被忽略（见 normalize）：行号只认位置参数写法，所以
+    `-g f:3` 与 `f:3` 发出的是同一份报文。
 
     -m / --merge 认 4 个取值（path1 path2 base result）：原样进 fileURIs 并置
-    mergeMode。少一个、或某个取值又是个选项，都交回 CLI 让它自己报错。
+    mergeMode。少一个、或某个取值又是个选项，都交回 CLI。
 
     --wait / -w 要带 marker（make_marker() 造的那个空文件路径）：带上就直连等
     窗口删它，没带就交回 CLI——CLI 自己会造一个。和 CLI 一样，--wait 必须至少
@@ -977,13 +971,19 @@ def open_request(args, marker=None):
     True
     >>> open_request(['--wait', '/']) is None       # --wait 只给目录，CLI 也不认
     True
-    >>> open_request(['-g', '/no-such-dir/x.py:3'])['fileURIs']
+    >>> open_request(['-g', '/no-such-dir/x.py:3'])['fileURIs']    # -g 忽略，值照位置参数走
     ['file:///no-such-dir/x.py:3']
     >>> open_request(['--goto', '/no-such-dir/x.py:3'])['gotoLineMode']
     True
     >>> open_request(['--goto=/no-such-dir/x.py:3:5'])['fileURIs']
     ['file:///no-such-dir/x.py:3:5']
     >>> open_request(['-r', '-g', '/no-such-dir/x.py:3'])['forceReuseWindow']
+    True
+    >>> open_request(['-g', '/no-such-dir/x.py'])['gotoLineMode']   # 没行号：普通文件
+    False
+    >>> open_request(['-g', '/'])['folderURIs']                     # 目录照样分开
+    ['file:///']
+    >>> open_request(['--goto=']) is None                           # 空值：忽略
     True
     >>> open_request(['-m', '/a', '/b', '/base', '/res'])['mergeMode']
     True
@@ -995,15 +995,15 @@ def open_request(args, marker=None):
     True
     >>> open_request(['-m', '/a', '-r', '/base', '/res']) is None  # 取值又是个选项
     True
-    >>> open_request(['-g']) is None                        # 没给取值
+    >>> open_request(['-g']) is None                        # 选项被忽略，没东西可开
     True
-    >>> open_request(['-g', '-r']) is None                  # 取值又是个选项
+    >>> open_request(['-g', '-r']) is None                  # 只剩 -r：还是没东西可开
     True
     >>> open_request([]) is None
     True
     """
 
-    return to_msg(tokenize(args), marker)
+    return to_msg(normalize(args), marker)
 
 
 def to_msg(tokens, marker=None):
@@ -1012,31 +1012,21 @@ def to_msg(tokens, marker=None):
     见到 ('other', …) 就返回 None —— 交回 CLI：认不出来的我们不猜，让 CLI 自己
     去解释。--wait 没造出 marker 同理（CLI 自己会造一个）。
 
-    >>> to_msg(tokenize(['/no-such-dir/a.txt:3']))['fileURIs']
+    >>> to_msg(normalize(['/no-such-dir/a.txt:3']))['fileURIs']
     ['file:///no-such-dir/a.txt:3']
-    >>> to_msg(tokenize(['-m', 'a', 'b', 'base', 'res']))['mergeMode']
+    >>> to_msg(normalize(['-m', 'a', 'b', 'base', 'res']))['mergeMode']
     True
-    >>> to_msg(tokenize(['--wait', 'a.txt']), '/m')['waitMarkerFilePath']
+    >>> to_msg(normalize(['--wait', 'a.txt']), '/m')['waitMarkerFilePath']
     '/m'
-    >>> to_msg(tokenize(['--wait', 'a.txt'])) is None        # 没 marker
+    >>> to_msg(normalize(['--wait', 'a.txt'])) is None        # 没 marker
     True
-    >>> to_msg(tokenize(['/']))['folderURIs']
+    >>> to_msg(normalize(['/']))['folderURIs']
     ['file:///']
-    >>> to_msg(tokenize(['--', 'a.txt'])) is None            # 认不出来
+    >>> to_msg(normalize(['--', 'a.txt'])) is None            # 认不出来
     True
     >>> to_msg([]) is None                                  # 没东西可开
     True
     """
-
-    def goto_uri(value):
-        """-g 的取值 -> file URI：无条件按 :行号[:列] 拆，拆不动就整个当路径
-
-        不能直接 file_uri(value)：它把路径整体 percent 编码，:3 会变成 %3A。
-        """
-
-        goto = split_goto(value)
-
-        return file_uri(*goto) if goto else file_uri(value)
 
     msg = {
         'type': 'open',
@@ -1065,7 +1055,7 @@ def to_msg(tokens, marker=None):
             msg['gotoLineMode'] = True
 
         else:                               # ('opt', …)
-            _opt, _flag, field, category, values, _orig = t
+            _opt, _flag, field, values = t
 
             if field == 'wait':
                 if not marker:
@@ -1077,7 +1067,7 @@ def to_msg(tokens, marker=None):
             msg[field] = True
 
             for v in values:
-                msg['fileURIs'].append(goto_uri(v) if category == 'goto' else file_uri(v))
+                msg['fileURIs'].append(file_uri(v))
 
     if marker and not msg['fileURIs']:
         return None                         # CLI 要求 --wait 至少带一个文件
@@ -1119,34 +1109,29 @@ def plus_col(sep):
 
 
 # 每个 kind 怎么把 token 翻译成命令行 —— "针对不同程序翻译"就这一张表：
-#   goto   : (文件, 行号, 列号) -> 片段列表
+#   goto   : (文件, 行号, 列号) -> 片段列表（一个目标一次，多目标就多份 ——
+#            实测 CLI 的 -g 可以重复，报文是累加的）
 #   wait   : --wait / -w 保不保留
-#   goto_flag : 这类 CLI 自己认 -g / --goto 吗？认得就原样递过去（命令行里已经有
-#               -g 也不再插 --goto）；不认得就按 goto 把 -g 的取值翻一遍
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
 EMIT = {
     CLI_KIND_CODE: {
         'goto': lambda file, line, column: ['--goto', goto_target((file, line, column))],
         'wait': True,
-        'goto_flag': True,
         'abspath': True,
     },
     CLI_KIND_VIM: {
-        'goto': plus_goto,
+        'goto': plus_goto,              # vim -g 是启动 GUI（E25 退出 2），绝不能透传
         'wait': False,
-        'goto_flag': False,             # vim -g 是启动 GUI（E25 报错退出 2）
         'abspath': False,
     },
     CLI_KIND_NANO: {
-        'goto': plus_col(','),          # +行号[,列号]
+        'goto': plus_col(','),          # +行号[,列号]（nano -g 是 --showcursor）
         'wait': False,
-        'goto_flag': False,             # nano -g 是 --showcursor
         'abspath': False,
     },
     CLI_KIND_EMACS: {
-        'goto': plus_col(':'),          # +行号[:列号]
+        'goto': plus_col(':'),          # +行号[:列号]（emacs -g 是 --geometry）
         'wait': False,
-        'goto_flag': False,             # emacs -g 是 --geometry，会吃掉后面的文件名
         'abspath': False,
     },
 }
@@ -1155,44 +1140,43 @@ EMIT = {
 def to_argv(tokens, kind):
     """token -> 交给 CLI 的参数（CLI 后端，按 kind 查 EMIT）
 
-    >>> to_argv(tokenize(['a.txt:12']), CLI_KIND_CODE)      # 插 --goto
+    >>> to_argv(normalize(['a.txt:12']), CLI_KIND_CODE)      # 插 --goto
     ['--goto', 'a.txt:12']
-    >>> to_argv(tokenize(['a.txt:12']), CLI_KIND_VIM)       # +行号 放文件前
+    >>> to_argv(normalize(['a.txt:12', 'b.txt:9']), CLI_KIND_CODE)  # 一个目标一份
+    ['--goto', 'a.txt:12', '--goto', 'b.txt:9']
+    >>> to_argv(normalize(['a.txt:12']), CLI_KIND_VIM)       # +行号 放文件前
     ['+12', 'a.txt']
-    >>> to_argv(tokenize(['a.txt:12']), None)               # 认不出：原样
-    ['a.txt:12']
-    >>> to_argv(tokenize(['-r', 'a.txt:12']), CLI_KIND_CODE)  # 就地成对插
+    >>> to_argv(normalize(['a.txt:12']), None)               # 认不出：只传文件
+    ['a.txt']
+    >>> to_argv(normalize(['-r', 'a.txt:12']), CLI_KIND_CODE)  # 就地成对插
     ['-r', '--goto', 'a.txt:12']
-    >>> to_argv(tokenize(['-g', 'a.txt:12']), CLI_KIND_CODE)  # 已有 -g 不重复插
-    ['-g', 'a.txt:12']
-    >>> to_argv(tokenize(['-g', 'a.txt:12']), CLI_KIND_VIM)   # vim 不认 -g：翻成 +行号
+    >>> to_argv(normalize(['-g', 'a.txt:12']), CLI_KIND_CODE)  # -g 被忽略，仍插 --goto
+    ['--goto', 'a.txt:12']
+    >>> to_argv(normalize(['-g', 'a.txt:12']), CLI_KIND_VIM)   # vim 不认 -g：翻成 +行号
     ['+12', 'a.txt']
-    >>> to_argv(tokenize(['--goto=a.txt:12']), CLI_KIND_VIM)  # --goto= 同样翻
+    >>> to_argv(normalize(['--goto=a.txt:12']), CLI_KIND_VIM)  # --goto= 同样翻
     ['+12', 'a.txt']
-    >>> to_argv(tokenize(['-g', 'a.txt']), CLI_KIND_VIM)      # 取值没行号：只剩文件
+    >>> to_argv(normalize(['-g', 'a.txt']), CLI_KIND_VIM)      # 取值没行号：只剩文件
     ['a.txt']
-    >>> to_argv(tokenize(['a.txt:3', '-g', 'b.txt:9']), CLI_KIND_VIM)  # 两个都翻
+    >>> to_argv(normalize(['a.txt:3', '-g', 'b.txt:9']), CLI_KIND_VIM)  # 两个都翻
     ['+3', 'a.txt', '+9', 'b.txt']
-    >>> to_argv(tokenize(['--wait', 'a.txt']), CLI_KIND_CODE)
+    >>> to_argv(normalize(['--wait', 'a.txt']), CLI_KIND_CODE)
     ['--wait', 'a.txt']
-    >>> to_argv(tokenize(['--wait', 'a.txt']), CLI_KIND_VIM)  # vim 没有 --wait
+    >>> to_argv(normalize(['--wait', 'a.txt']), CLI_KIND_VIM)  # vim 没有 --wait
     ['a.txt']
-    >>> to_argv(tokenize(['-m', 'a', 'b', 'base', 'res']), CLI_KIND_CODE)
+    >>> to_argv(normalize(['-m', 'a', 'b', 'base', 'res']), CLI_KIND_CODE)
     ['-m', 'a', 'b', 'base', 'res']
-    >>> to_argv(tokenize(['--', 'a.txt:12']), CLI_KIND_CODE)  # -- 之后原样
+    >>> to_argv(normalize(['--', 'a.txt:12']), CLI_KIND_CODE)  # -- 之后原样
     ['--', 'a.txt:12']
     """
 
-    unknown = {                             # 认不出是哪一类：行号原样透传
-        'goto': lambda file, line, column: [goto_target((file, line, column))],
+    unknown = {                             # 认不出是哪一类：只传文件，行号丢掉
+        'goto': lambda file, line, column: [file],
         'wait': False,
-        'goto_flag': False,
         'abspath': False,
     }
 
     emit = EMIT.get(kind, unknown)
-
-    rewrite = kind and (not emit['goto_flag'] or not has_goto_flag(tokens))
     out = []
 
     for t in tokens:
@@ -1203,29 +1187,16 @@ def to_argv(tokens, kind):
             out.append(t[1])
 
         elif t[0] == 'goto':
-            if rewrite:
-                out.extend(emit['goto'](*t[1:]))
-            else:
-                out.append(goto_target(t[1:]))
+            out.extend(emit['goto'](*t[1:]))
 
         else:                               # ('opt', …)
-            _opt, flag, field, category, values, orig = t
+            _opt, flag, field, values = t
 
             if field == 'wait' and not emit['wait']:
                 continue                    # 这类 CLI 没有 --wait：摘掉
 
-            if category == 'goto' and not emit['goto_flag']:
-                for v in values:            # 这类 CLI 不认 -g：按它自己的写法翻取值
-                    goto = split_goto(v)
-
-                    out.extend(emit['goto'](*goto) if goto else [v])
-                continue                    # 名字（-g / --goto）丢掉，只留目标
-
-            if orig:                        # --goto=X：照原写法吐回去
-                out.append(orig)
-            else:
-                out.append(flag)
-                out.extend(values)
+            out.append(flag)
+            out.extend(values)
 
     if emit['abspath']:
         out = [os.path.abspath(a) if os.path.exists(a) else a for a in out]
@@ -1234,9 +1205,9 @@ def to_argv(tokens, kind):
 
 
 def cli_argv(args, kind):
-    """命令行 -> 交给 CLI 的参数（tokenize + to_argv，测试走这个缝）"""
+    """命令行 -> 交给 CLI 的参数（normalize + to_argv，测试走这个缝）"""
 
-    return to_argv(tokenize(args), kind)
+    return to_argv(normalize(args), kind)
 
 
 def socket_open(sock, msg, timeout=3.0):
@@ -1581,7 +1552,7 @@ def main():
         return 1 if result.failed else 0
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv
-    tokens = tokenize(args)
+    tokens = normalize(args)
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
     # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径

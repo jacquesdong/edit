@@ -43,7 +43,7 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
    抓包对出来的，字段与它逐字节一致；回复只认 HTTP 200。
    这条路径不需要 PATH 里有 `remote-cli`，也不起 node。
 2. **remote-cli**：没有 socket（桌面版），或参数翻不了（未知选项 / `--wait`
-   但没给文件 / `-g` `-m` 的取值没给够 / 无参数）时，照旧找 `code` / `buddycn` /
+   但没给文件 / `-m` 的取值没给够 / 无参数）时，照旧找 `code` / `buddycn` /
    `trae-cn` 去开。
    直连失败也会回退到这里，并在 stderr 留一行提示。
 
@@ -54,11 +54,17 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
 "把键入的命令写进文件"的意思；emacsclient 的 `-w` 是 `--timeout=SECONDS`；而
 终端 vim / emacsclient 本来就等到退出）。
 
-`-g` / `--goto` 同样只在 VS Code 系成立：交回 vim 系 CLI 时**翻译**成它的写法
-（`vim +3 f`、`emacsclient +3 f`）—— 不能像 `--wait` 那样摘掉，因为它带着取值
-（vim 的 `-g` 是启动 GUI，会 `E25` 退出 2；emacs 的 `-g` 是 `--geometry`，会把
-后面的文件名吃掉、什么都不打开；nano 的 `-g` 是 `--showcursor`）。认不出是哪
-一类的 CLI 只留跳转目标。
+`-g` / `--goto` / `--goto=X` 直接**忽略**：行号只认位置参数写法（`文件:行号[:列]`），
+而 edit 对带行号的参数本来就置 `gotoLineMode`，所以 `-g f:3` 和 `f:3` 完全等价。
+`-g` / `--goto` 不消费后面的参数（`-g -r f:3` 里 `-r` 仍然是选项），`--goto=X` 的 X
+是内联值、当字面路径（`--goto=-r` 就是文件 `-r`；空值 `--goto=` 也忽略）。
+
+行号只在交回别的 CLI 时才需要翻译：code 系 `--goto 文件:行:列`（一个目标一份 ——
+实测 CLI 的 `-g` 可以重复，报文是累加的）、vim 系 `+行号`、认不出是哪一类的 CLI
+只传文件。
+所以绝不能把 `-g` 原样透传过去（vim 的 `-g` 是启动 GUI 会 `E25` 退出 2；emacs 的
+`-g` 是 `--geometry`，会把后面的文件名吃掉、什么都不打开；nano 的 `-g` 是
+`--showcursor`）。
 
 用 `+行号` 的不止 vim：`nano` 是一类、`emacs` 与 `emacsclient` 是一类。列号只有
 vim 不支持：VS Code 系 `--goto 文件:行:列`、emacs 系 `+N:M`、nano `+N,M`

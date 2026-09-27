@@ -48,7 +48,7 @@ Content-Length: 189
 | `edit a.txt` | `fileURIs:["file:///…/a.txt"]`、`gotoLineMode:false` |
 | `edit a.txt:3` | **行号拼在 URI 里**：`file:///…/a.txt:3`、`gotoLineMode:true` |
 | `edit a.txt:3:5` | `file:///…/a.txt:3:5`（列号可选） |
-| `edit -g a.txt:3` | 同上：取值原样拼进 URI 并置 `gotoLineMode:true`（直连，与 CLI 一致） |
+| `edit -g a.txt:3` | 同上：`-g` 被忽略，跟位置参数 `a.txt:3` 完全一样（直连，与 CLI 一致） |
 | `edit -r a.txt` | `forceReuseWindow:true` |
 | `edit -n a.txt` | `forceNewWindow:true` |
 | `edit -a a.txt` | `addMode:true` |
@@ -123,32 +123,36 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   行为和不装 fzf 时一模一样；
 - `EDIT_FZF=0 / off / never` 显式关（测试里必须关，否则会真拉起一个选择器）。
 
-### 命令行只扫一次：tokenize + 两个后端
+### 命令行只扫一次：normalize + 两个后端
 
 早先每个功能各扫一遍命令行（`open_request` 认选项翻报文、`wants_wait` 找 `--wait`、
 `drop_wait` 摘 `--wait`、`apply_goto` / `goto_args` / `abspath_args` / `has_goto`
 再改写一遍给 CLI），加一个选项要动三四处。现在只扫一次：
 
 ```
-args --tokenize--> [token] --to_msg---> open 报文（socket 后端）
-                          \-to_argv--> CLI 命令行（CLI 后端，按 kind 查 EMIT）
+args --normalize--> [token] --to_msg---> open 报文（socket 后端）
+                           \-to_argv--> CLI 命令行（CLI 后端，按 kind 查 EMIT）
 ```
 
-- `OPTIONS`：名字 -> (报文字段, 取值个数, 取值种类)，认识的参数就这一张表；
-- token 是 tuple：`('opt', …)` / `('goto', 文件, 行号, 列号)` / `('file', …)` /
-  `('folder', …)` / `('other', 原文)`；
-- `EMIT`：每个 kind 怎么翻译（goto 写成什么、--wait 保不保留、-g 这类 CLI 自己认
-  不认、路径转不转绝对）—— "针对不同程序翻译命令"就这一张表；
-- 认不出来的（不认识的选项、取值不够的、-- 之后的字面量）一律整成
+叫 `normalize` 而不是 `tokenize`：它不做保真的一比一还原，`-g` / `--goto` 这类选项
+会被消化掉（见下），留下来的只有 token 之间的**顺序**。
+
+- `OPTIONS`：名字 -> (报文字段, 取值个数)，认识的参数就这一张表（只剩开关与
+  `-m` / `--merge`）；
+- token 是 tuple：`('opt', 名字, 报文字段, [取值])` / `('goto', 文件, 行号, 列号)` /
+  `('file', 路径)` / `('folder', 路径)` / `('other', 原文)`；
+- `EMIT`：每个 kind 怎么翻译（goto 写成什么、`--wait` 保不保留、路径转不转绝对、
+  跳转选项是不是只能给一次）—— "针对不同程序翻译命令"就这一张表；
+- 认不出来的（不认识的选项、取值不够的、`--` 之后的字面量）一律整成
   `('other', 原文)`：socket 后端见它就返回 None 交回 CLI，CLI 后端原样吐回去。
 
-两条硬约束：
+两条约束：
 
-1. **保序**：中间表示是带注释的 token 列表，不是"字段袋" —— 否则
-   `buddycn --locale zh -r f` 会被重排，语义就变了（旧代码里 `apply_goto`
-   "就地成对插"就是在保序，只是这一点藏得太深）。
-2. **原样透传**：认不出来的只能标注、不能报错；连 `--goto=X` 这种内联写法的原文
-   拼写都留在 token 里，回退时照原样交给 CLI。
+1. **保序**：中间表示是列表，不是"字段袋" —— 否则 `buddycn --locale zh -r f`
+   会被重排，语义就变了（旧代码里 `apply_goto` "就地成对插"就是在保序，只是
+   这一点藏得太深）。
+2. **认不出的原样透传**：不认识的选项只能标注、不能报错，回退时照原样交给 CLI；
+   认得的（`-g`）不保证原样 —— 它会被归一化掉（下一节）。
 
 重构时拿 HEAD 的旧实现逐条对照过：27 组参数 × 2 种 marker × 3 种 kind，两个后端
 的输出**全部一致**；护栏还有 72 个测试 + fixtures（真 CLI 报文快照）。
@@ -200,9 +204,31 @@ nano / emacs 以及认不出来的 CLI（kind 为 None）同样摘。
 
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
 
-### 交回别的 CLI 时把 -g 翻译掉（不是摘掉）
+### -g / --goto 直接被忽略
 
-`-g` / `--goto` / `--goto=X` 同样只有 VS Code 系认得，别的 CLI 各有各的灾难：
+`-g` / `--goto` 的语义只有一条：置 `gotoLineMode`。而 edit 对**任何**带行号的位置
+参数本来就置它（见上"唯一与 CLI 故意不同的字段"），所以这两个选项在 edit 里没有
+信息量 —— `-g f:3` 与 `f:3` 发出的是同一份报文、同一个命令行，于是直接忽略：
+
+- `-g` / `--goto` **不消费参数**：后面那个参数自己按位置参数处理，所以 `-g -r f:3`
+  里 `-r` 仍然是选项。真 CLI 也是这么理解的（实测 `buddycn -g -r` 发的是
+  `gotoLineMode:true` + `forceReuseWindow:true` + 空 fileURIs）；
+- `--goto=X` 的 X 是内联值（语法上不可能与选项混淆），一律当字面路径走位置参数那套
+  判断：`--goto=-r` 就是文件 `-r`（类似 `--` 之后的字面量），空值 `--goto=` 忽略；
+- 于是"是否跳转"的唯一裁判是 `parse_goto`（位置参数那两步：真实文件优先 +
+  `非目录:数字[:数字]`），`split_goto` 退化成它内部的一步。
+
+顺带修掉两处对不齐 CLI 的地方（都是实测）：
+
+| 命令 | 旧行为 | 真 CLI | 现在 |
+|---|---|---|---|
+| `edit -g <目录>` | 目录进 `fileURIs` | `folderURIs` | `folderURIs` |
+| `edit -g f`（值没行号） | 置 `gotoLineMode` | 置 | 不置（URI 相同、没行号可跳，看不出差别） |
+
+代价是 `-g x:3` 且真实存在名为 `x:3` 的文件时按"真实文件优先"、不跳行 —— 位置参数
+今天也是这个行为，统一判断必然如此。
+
+**绝不能把 `-g` 原样透传**给别的 CLI（这是忽略它的收益之一）：
 
 - vim：`vim -g f` -> `E25: GUI cannot be used: Not enabled at compile time`，退出 2
   （`-g` 是启动 GUI）；
@@ -213,24 +239,21 @@ nano / emacs 以及认不出来的 CLI（kind 为 None）同样摘。
 - nano：`-g` 是 `--showcursor`（"在文件浏览器和帮助里显示光标"），跟跳转无关；
 - 认不出是哪一类的（kind 为 None）：压根没这个选项。
 
-**不能照 `--wait` 那样摘**：`-g` 带着取值，摘掉连文件一起没了。所以按
-`EMIT.goto_flag` 分两类（`--wait` 那张表多加一项）：
-
-- code 系（`goto_flag: True`）：自己认，`-g X` 原样递过去；命令行里已有 `-g` 时
-  我们也不再插 `--goto`（别给两个跳转目标）—— 这是它唯一的作用；
-- 其余（`goto_flag: False`）：**翻译** —— `-g X` 按 `split_goto(X)` 拆成 `+行号 文件`
-  （vim 系写法）或 `X`（认不出的一类，只把 `-g` 丢掉）；拆不出行号就只留 `X`；
-  位置参数 `文件:行号` 恢复翻译（以前被 `-g` 一起压制了，那是为 code 系写的规则）。
-
-真机（`--dry-run`，去掉 socket 才走得到 CLI 路径）：
+行号只在交回 CLI 时才需要翻译，按 kind 查 `EMIT['goto']`：code 系
+`--goto 文件:行:列`（一个目标一份 —— 实测 CLI 的 `-g` 可以重复，`buddycn -g a:3 -g b:9`
+与 `-g a:3 b:9` 发出的报文逐字节相同）、vim 系 `+行号`、认不出的一类只传文件
+（`ed a.txt:3` 会去开/建一个叫 `a.txt:3` 的文件）。真机（`--dry-run`，去掉 socket
+才走得到 CLI 路径）：
 
 ```
 edit -g /tmp/a.txt:3  ->  /usr/bin/vim  +3 /tmp/a.txt
                           /usr/bin/nano +3 /tmp/a.txt
                           /usr/local/bin/emacs       +3 /tmp/a.txt
                           /usr/local/bin/emacsclient +3 /tmp/a.txt
-                          /usr/bin/ed   /tmp/a.txt:3
+                          /usr/bin/ed   /tmp/a.txt
 edit -g /tmp/a.txt    ->  /usr/bin/vim  /tmp/a.txt        # 没行号：只留文件
+edit -g /tmp/a.txt:3 /tmp/b.txt:9
+                      ->  re…/buddycn --goto /tmp/a.txt:3 --goto /tmp/b.txt:9
 ```
 
 行号写法各家一致（`+N f`），**只有列号不同**：
@@ -270,7 +293,7 @@ buffer 上 —— 只有位置参数的版本里就已经是这样，不是这�
    `node`**，就按 VS Code 系处理 —— 新产品名不必进白名单。
 
 第 2 条那个 `node` 是**故意的防误判**：目录名恰好叫 `remote-cli` 的自制目录、别家
-工具都能撞上，只看目录名会把它们的 `-g` 当成 VS Code 的 `-g` 递过去（对
+工具都能撞上，只看目录名会把它们的行号翻成 `--goto`、把 `--wait` 留下来（对
 vim / nano / emacs 那几家是有害的，见上两节）。要求"上两级有 `node`"才是 server
 端包装脚本的特征（`<安装目录>/bin/<版本>/bin/remote-cli/<产品>` 的包装脚本会
 exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的是**同一个结构事实**。
@@ -331,10 +354,8 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
 ## 还没做 / 待办
 
 1. ~~`--wait`~~ 已直连（见上：mkstemp marker + 等窗口删它，与 CLI 同机制）。
-   `-g` / `--goto` 也已直连：取值就是跳转目标，无条件按 `:行号[:列]` 拆
-   （`split_goto()`，不做"真实文件优先"那层判断 —— CLI 也是这么拆的，
-   fixtures 的 `open-goto-short` / `open-goto-flag` 都是证据）。取值缺失或
-   又是个选项时交回 CLI 让它报错。
+   `-g` / `--goto` 现在直接忽略（取值按位置参数走，所以照旧直连；
+   fixtures 的 `open-goto-short` / `open-goto-flag` 报文仍逐字节对得上）。
    `--merge` / `-m` 也已直连：吃 4 个路径（path1 path2 base result）原样进
    `fileURIs` 并置 `mergeMode`，不足 4 个、或某个取值又是个选项，交回 CLI
    （fixtures 的 `open-merge` / `open-merge-short` 已标 `direct:true`）。
