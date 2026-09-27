@@ -490,6 +490,122 @@ class CliArgvTest(EditCase):
         self.assertEqual(edit.cli_argv(['--', '-w', 'a.txt:3'], edit.CLI_KIND_CODE),
                          ['--', '-w', 'a.txt:3'])
 
+    def test_future_remote_cli_like_code(self):
+        """remote-cli 里的新产品名也按 code 系：-g 必须原样保留"""
+
+        install = os.path.join(self.dir, 'future-ide')
+        cli_dir = os.path.join(install, 'bin', 'remote-cli')
+        os.makedirs(cli_dir)
+        cli = os.path.join(cli_dir, 'future-code')
+
+        for path in (cli, os.path.join(install, 'node')):
+            with open(path, 'w'):
+                pass
+            os.chmod(path, 0o755)
+
+        kind = edit.cli_kind(cli)
+        self.assertEqual(kind, edit.CLI_KIND_CODE)
+
+        arg = 'a.txt:12:3'
+        self.assertEqual(edit.cli_argv(['-g', arg], kind), ['-g', arg])
+
+
+class CliKindTest(EditCase):
+    """认 CLI 是哪一类：basename 查表 + `<安装目录>/bin/remote-cli` 结构兜底
+
+    结构兜底要求"上两级有可执行的 node"（防误判，见 NOTES）。find_remote_cli 复用
+    同一个判据（have_remote_cli），所以一起测。
+    """
+
+    def make_install(self, product='future-code', node=True, mode=0o755, name='ide'):
+        """造 server 端安装目录，返回 <…>/bin/remote-cli/<产品>
+
+        node=False 干脆不放；mode 给 0o644 就是造一个不可执行的。
+        """
+
+        install = os.path.join(self.dir, name)
+        cli = os.path.join(install, 'bin', 'remote-cli', product)
+        os.makedirs(os.path.dirname(cli), exist_ok=True)
+
+        with open(cli, 'w'):
+            pass
+        os.chmod(cli, 0o755)
+
+        if node:
+            with open(os.path.join(install, 'node'), 'w'):
+                pass
+            os.chmod(os.path.join(install, 'node'), mode)
+
+        return cli
+
+    def test_structure_without_node_is_unknown(self):
+        """结构对但没 node：不当 code 系（判据是防误判，不能只看目录名）"""
+
+        cli = self.make_install(node=False)
+
+        self.assertFalse(edit.have_remote_cli(os.path.dirname(cli)))
+        self.assertIsNone(edit.cli_kind(cli))
+        self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], None), ['a.txt:12:3'])
+
+    def test_node_must_be_executable(self):
+        cli = self.make_install(mode=0o644)
+
+        self.assertFalse(edit.have_remote_cli(os.path.dirname(cli)))
+        self.assertIsNone(edit.cli_kind(cli))
+
+    def test_have_remote_cli_needs_the_dir_name(self):
+        """目录名不是 remote-cli（哪怕上两级真有 node）：不认"""
+
+        self.make_install()
+        other = os.path.join(self.dir, 'ide', 'bin', 'not-remote-cli')
+        os.makedirs(other)
+
+        for d in (other, os.path.join(self.dir, 'ide'),
+                  os.path.join(self.dir, 'ide', 'bin'), self.dir):
+            with self.subTest(d):
+                self.assertFalse(edit.have_remote_cli(d))
+
+    def test_basename_wins_over_structure(self):
+        """表里认识的名字优先：remote-cli 结构里的 vim 还是 vim"""
+
+        cli = self.make_install(product='vim')
+
+        self.assertEqual(edit.cli_kind(cli), edit.CLI_KIND_VIM)
+
+    def test_unknown_name_outside_structure(self):
+        cli = self._touch('weird-editor')
+        os.chmod(cli, 0o755)
+
+        self.assertIsNone(edit.cli_kind(cli))
+
+    def test_find_remote_cli(self):
+        """PATH 里有 remote-cli 且有 hook：就用它"""
+
+        cli = self.make_install()
+
+        with patch.dict(os.environ, {edit.IPC_HOOK: '/tmp/fake.sock',
+                                     'PATH': os.path.dirname(cli)}, clear=True):
+            self.assertEqual(edit.find_remote_cli(), [cli])
+
+    def test_find_remote_cli_needs_hook(self):
+        """没有 VSCODE_IPC_HOOK_CLI 就不找（remote-cli 缺 hook 自己会报错）"""
+
+        cli = self.make_install()
+
+        with patch.dict(os.environ, {'PATH': os.path.dirname(cli)}, clear=True):
+            self.assertIsNone(edit.find_remote_cli())
+
+    def test_find_remote_cli_skips_dir_without_node(self):
+        """PATH 里那个没 node 的不算，继续往后找（和 cli_kind 同一判据）"""
+
+        bad = self.make_install(node=False, name='bad-ide')
+        good = self.make_install(name='good-ide')
+        path = os.pathsep.join((os.path.dirname(bad), os.path.dirname(good)))
+
+        with patch.dict(os.environ, {edit.IPC_HOOK: '/tmp/fake.sock',
+                                     'PATH': path}, clear=True):
+            self.assertEqual(edit.find_remote_cli(), [good])
+
 
 class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""

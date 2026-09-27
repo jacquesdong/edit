@@ -263,6 +263,23 @@ edit -g /tmp/a.txt    ->  /usr/bin/vim  /tmp/a.txt        # 没行号：只留�
 多个文件各带行号（`edit a.txt:3 b.txt:9`）vim 只会把两个 `+N` 依次用在第一个
 buffer 上 —— 只有位置参数的版本里就已经是这样，不是这次引入的。
 
+### 认不出产品名时怎么定 kind（`cli_kind` 的两条判据）
+
+1. 先比 basename 查 `CLI_KIND`（`code` / `vim` / `nano` / `emacs`）；
+2. 名字不在表里、但路径是 `<安装目录>/bin/remote-cli/<产品>`，**且上两级有可执行的
+   `node`**，就按 VS Code 系处理 —— 新产品名不必进白名单。
+
+第 2 条那个 `node` 是**故意的防误判**：目录名恰好叫 `remote-cli` 的自制目录、别家
+工具都能撞上，只看目录名会把它们的 `-g` 当成 VS Code 的 `-g` 递过去（对
+vim / nano / emacs 那几家是有害的，见上两节）。要求"上两级有 `node`"才是 server
+端包装脚本的特征（`<安装目录>/bin/<版本>/bin/remote-cli/<产品>` 的包装脚本会
+exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的是**同一个结构事实**。
+
+代价：`find_remote_cli` 复用同一个判据，所以也变严了 —— 真遇到没有 `node` 的安装
+就不再认它，会退回 `$VISUAL` / `$EDITOR` / vim 兜底。本机实测
+`<安装目录>/bin/<版本>/node` 存在且可执行（123MB），满足。用例：
+`CliArgvTest.test_future_remote_cli_like_code`（造一个假 `future-code` + `node`）。
+
 ### 打开 ≠ 激活（已知限制，别再去找"少发了什么"）
 
 `--interactive` 挑别的 IDE 的窗口：`HTTP 200`、文件确实打开了，**但那个窗口不会被置前**。

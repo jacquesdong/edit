@@ -77,6 +77,7 @@ import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
 
+# 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
 
 # 挑窗口时不想用 fzf 就设成 0 / off / never（脚本、测试）
@@ -172,6 +173,19 @@ def choose_cli_exe(remote_cli_dir):
 
     return None
 
+def have_remote_cli(d):
+    """目录是不是 <安装目录>/bin/remote-cli
+
+    remote-cli 的上两级是 <安装目录>/bin/<版本>，那里必定有 node（包装脚本会
+    exec 它）。find_remote_cli 用这个结构找 CLI；cli_kind 也靠它判断未知产品名：
+    这里的 CLI 即使还没进 CODE_LIKE，也是 VS Code 系协议。
+    """
+
+    d = d.rstrip(os.sep)
+
+    return (os.path.basename(d) == 'remote-cli' and
+            os.access(os.path.join(d, os.pardir, os.pardir, 'node'), os.X_OK))
+
 def find_remote_cli():
     """从 PATH 里找 server 端的 remote-cli：<安装目录>/bin/remote-cli/<产品>
 
@@ -197,20 +211,11 @@ def find_remote_cli():
         if not d:
             continue
 
-        # remote-cli 的上两级是 <安装目录>/bin/<版本>，那里必定有 node
-        # （包装脚本就是 exec "$ROOT/node" "$CLI_SCRIPT"）。用这个结构判断，
-        # 比 'server' in d 这类命名约定可靠，也顺带排除掉同名的无关目录。
-        if not os.access(os.path.join(d, os.pardir, os.pardir, 'node'), os.X_OK):
+        if not have_remote_cli(d):
             continue
-
-        d = d.rstrip(os.sep)
 
         # 目录名 remote-cli 是唯一与产品无关的线索，剩下的交给 choose_cli_exe
-        b = os.path.basename(d)
-        if b != 'remote-cli':
-            continue
-
-        cli = choose_cli_exe(d)
+        cli = choose_cli_exe(d.rstrip(os.sep))
         if cli:
             return [cli,]
 
@@ -324,9 +329,10 @@ def split_cmd(v):
 def cli_kind(cli):
     """判断 cli 属于哪一类，决定 file:行号 用哪种写法
 
-    参数是 cli 的绝对路径（find_cli()[0]），所以比 basename，不能比整条命令行。
-    -g 只对 VS Code 系成立；对 vim 系还是有害的（vim -g 是启动 GUI）。
-    不在 CLI_KIND 表里的返回 None，按"不认行号"处理：参数原样透传。
+    先比 basename；名字不在表里、但路径符合 server 端 remote-cli 结构时，也按
+    VS Code 系处理（新产品名不必进白名单）。-g 只对 VS Code 系成立；对 vim 系
+    还是有害的（vim -g 是启动 GUI、emacs -g 是 --geometry 会吃掉后面的文件名、
+    nano -g 是 --showcursor）。其余 CLI 返回 None，按"不认行号"处理。
 
     >>> cli_kind('/opt/ide/bin/remote-cli/buddycn')
     'code'
@@ -334,13 +340,24 @@ def cli_kind(cli):
     'code'
     >>> cli_kind('/usr/bin/vim')
     'vim'
+    >>> cli_kind('/usr/bin/nano')                   # 同样用 +行号，但单开一类
+    'nano'
+    >>> cli_kind('/usr/local/bin/emacs')
+    'emacs'
+    >>> cli_kind('/usr/local/bin/emacsclient')      # 和 emacs 同一类
+    'emacs'
     >>> cli_kind('/usr/bin/ed') is None
     True
     """
 
-    name = os.path.basename(cli)
+    kind = CLI_KIND.get(os.path.basename(cli))
+    if kind:
+        return kind
 
-    return CLI_KIND.get(name)
+    if have_remote_cli(os.path.dirname(cli)):
+        return CLI_KIND_CODE
+
+    return None
 
 def split_goto(arg):
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
@@ -711,14 +728,16 @@ def socket_status(sock, timeout=1.5):
 
     return parse_status(text)
 
-# 认识的参数：名字 -> (报文字段, 取值个数, 取值种类)
+# 认识的参数：flag -> (field, arity, category)
+# flag:     命令行选项
+#
+# field:    报文字段
+# arity:    取值个数
+# category: 取值种类
 #
 # 取值种类：None = 开关（不带值）；'goto' = 跳转目标，无条件按 :行号[:列] 拆；
 # 'path' = 普通路径，原样不拆冒号（merge 的四个路径就是这种）。
 #
-# 'wait' 不是报文字段，只是个标记：直连时它对应 waitMarkerFilePath；交回 CLI 时
-# 只有 VS Code 系认得（vim 没有 --wait，-w 还是"把键入的命令写进 scriptout"）。
-# 加选项就改这一张表。
 OPTIONS = {
     '-r': ('forceReuseWindow', 0, None), '--reuse-window': ('forceReuseWindow', 0, None),
     '-n': ('forceNewWindow', 0, None), '--new-window': ('forceNewWindow', 0, None),
@@ -729,36 +748,40 @@ OPTIONS = {
     '--wait': ('wait', 0, None), '-w': ('wait', 0, None),
 }
 
-WAIT = 'wait'                   # OPTIONS 里那个标记的名字
-EQ_FORM = ('--goto',)           # 只有它支持 --goto=X 这种写法
-
 
 def tokenize(args):
     """命令行 -> token 列表：只扫一次，后面两个翻译后端都吃它
 
     token 是 tuple：
-
-        ('opt', 名字, 字段, 取值种类, [取值...], 原写法)
-                                        原写法：--goto=X 这种内联形式的原文
-                                        （CLI 后端照原样吐回去），其余为 None
-        ('goto', 文件, 行号, 列号)    位置参数 文件:行号[:列]
-        ('file', 路径) / ('folder', 路径)
-        ('other', 原文)              认不出来的：不认识的选项、取值不够的选项、
-                                     -- 之后的字面量
+    - token[0]  token 种类：'opt' / 'goto' / 'file' / 'folder' / 'other'
+        ('opt', flag, field, category, values, orig)
+            flag     选项字面量
+            field    报文字段
+            category 取值种类，见 OPTIONS 的第三列：None / 'goto' / 'path'
+            values   取值列表：[value...]，开关选项是 []（不带值）
+            orig     选项原文（原字符串）
+        ('goto', file, line, column)    文件:行号[:列]
+        ('file', path)
+        ('folder', path)
+        ('other', orig)              认不出来的：不认识的选项、取值不够的选项
 
     认不出来的一律整成 ('other', 原文) 而不是丢掉：socket 后端见它就交回 CLI，
     CLI 后端原样吐回去 —— 顺序和原文一字不改，因为回退时交给 CLI 的就是它。
 
-    >>> tokenize(['a.txt'])
-    [('file', 'a.txt')]
-    >>> tokenize(['a.txt:3'])
-    [('goto', 'a.txt', '3', None)]
-    >>> tokenize(['/tmp'])
-    [('folder', '/tmp')]
     >>> tokenize(['-r', 'a.txt'])
     [('opt', '-r', 'forceReuseWindow', None, [], None), ('file', 'a.txt')]
+    >>> tokenize(['--wait'])
+    [('opt', '--wait', 'wait', None, [], None)]
+    >>> tokenize(['-g', 'a.txt:3:4'])
+    [('opt', '-g', 'gotoLineMode', 'goto', ['a.txt:3:4'], None)]
     >>> tokenize(['--goto=a.txt:3'])
     [('opt', '--goto', 'gotoLineMode', 'goto', ['a.txt:3'], '--goto=a.txt:3')]
+    >>> tokenize(['a.txt:3'])
+    [('goto', 'a.txt', '3', None)]
+    >>> tokenize(['a.txt'])
+    [('file', 'a.txt')]
+    >>> tokenize(['/tmp'])
+    [('folder', '/tmp')]
     >>> tokenize(['-g'])                    # 取值不够
     [('other', '-g')]
     >>> tokenize(['-m', 'a', '-r', 'b'])    # 取值又是个选项
@@ -785,27 +808,27 @@ def tokenize(args):
             continue
 
         if a.startswith('-'):
-            name = a
+            flag = a
             inline = None
 
             if '=' in a:
                 head, _, inline = a.partition('=')
 
-                if head in EQ_FORM:
-                    name = head
+                if head == '--goto':    # 只有它支持 --goto=X 这种写法
+                    flag = head
                 else:
                     inline = None       # 别家的 --x=y 我们不拆
 
-            spec = OPTIONS.get(name)
+            spec = OPTIONS.get(flag)
 
             if not spec:
                 out.append(('other', a))
                 continue
 
-            field, arity, kind = spec
+            field, arity, category = spec
 
             if inline is not None:
-                out.append(('opt', name, field, kind, [inline], a))
+                out.append(('opt', flag, field, category, [inline], a))
                 continue
 
             values = args[i:i + arity]
@@ -815,7 +838,7 @@ def tokenize(args):
                 continue
 
             i += arity
-            out.append(('opt', name, field, kind, values, None))
+            out.append(('opt', flag, field, category, values, None))
             continue
 
         goto = parse_goto(a)
@@ -867,10 +890,10 @@ def has_wait(tokens):
     False
     """
 
-    return any(t[0] == 'opt' and t[2] == WAIT for t in tokens)
+    return any(t[0] == 'opt' and t[2] == 'wait' for t in tokens)
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
-WAIT_POLL = 1.0
+WAIT_MARKER_INTERVAL = 1.0
 
 
 def make_marker():
@@ -902,7 +925,7 @@ def remove_marker(path):
         pass
 
 
-def wait_marker(path, interval=WAIT_POLL):
+def wait_marker(path, interval=WAIT_MARKER_INTERVAL):
     """等窗口把 marker 删掉 —— 也就是等那个文件在编辑器里被关掉
 
     CLI 就是这么等的（server-cli.js：while (existsSync(marker)) sleep(1s)），
@@ -1042,9 +1065,9 @@ def to_msg(tokens, marker=None):
             msg['gotoLineMode'] = True
 
         else:                               # ('opt', …)
-            _, name, field, kind, values, _inline = t
+            _opt, _flag, field, category, values, _orig = t
 
-            if field == WAIT:
+            if field == 'wait':
                 if not marker:
                     return None             # 没造 marker：交回 CLI（它自己造）
 
@@ -1054,7 +1077,7 @@ def to_msg(tokens, marker=None):
             msg[field] = True
 
             for v in values:
-                msg['fileURIs'].append(goto_uri(v) if kind == 'goto' else file_uri(v))
+                msg['fileURIs'].append(goto_uri(v) if category == 'goto' else file_uri(v))
 
     if marker and not msg['fileURIs']:
         return None                         # CLI 要求 --wait 至少带一个文件
