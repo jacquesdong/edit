@@ -399,6 +399,38 @@ class CliArgvTest(EditCase):
         self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_VIM), ['+12', 'a.txt'])
         self.assertEqual(edit.cli_argv([arg], None), [arg])
 
+    def test_column_per_kind(self):
+        """列号：nano 用逗号、emacs 系用冒号、vim 不带（只有 vim 不带列）"""
+
+        arg = 'a.txt:12:3'
+
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_CODE), ['--goto', arg])
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_VIM), ['+12', 'a.txt'])
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_NANO), ['+12,3', 'a.txt'])
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_EMACS), ['+12:3', 'a.txt'])
+        self.assertEqual(edit.cli_argv([arg], None), [arg])
+
+    def test_column_with_goto_flag(self):
+        """-g 的取值带列：走同一个翻译（split_goto 已经把列拆出来了）"""
+
+        self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], edit.CLI_KIND_NANO),
+                         ['+12,3', 'a.txt'])
+        self.assertEqual(edit.cli_argv(['--goto=a.txt:12:3'], edit.CLI_KIND_EMACS),
+                         ['+12:3', 'a.txt'])
+
+    def test_plus_kinds(self):
+        """nano / emacs / emacsclient 各成一类，行号写法与 vim 相同（+N 前置）"""
+
+        for name, kind in (('nano', edit.CLI_KIND_NANO),
+                           ('emacs', edit.CLI_KIND_EMACS),
+                           ('emacsclient', edit.CLI_KIND_EMACS)):
+            with self.subTest(name):
+                self.assertEqual(edit.cli_kind('/usr/bin/' + name), kind)
+                self.assertEqual(edit.cli_argv(['a.txt:12'], kind), ['+12', 'a.txt'])
+                self.assertEqual(edit.cli_argv(['-g', 'a.txt:12'], kind),
+                                 ['+12', 'a.txt'])
+                self.assertEqual(edit.cli_argv(['--wait', 'a.txt'], kind), ['a.txt'])
+
     def test_goto_flag_wins(self):
         """已经有 -g / --goto 就不再插一个（CLI 自己认得）"""
 
@@ -407,6 +439,33 @@ class CliArgvTest(EditCase):
                 args = [flag] if '=' in flag else [flag, 'a.txt:12']
 
                 self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+
+    def test_goto_flag_translated_for_vim(self):
+        """vim 系不认 -g：按 +行号 翻一遍（vim -g 是启动 GUI，会 E25 报错退出 2）"""
+
+        for flag in ('-g', '--goto', '--goto=a.txt:12'):
+            with self.subTest(flag):
+                args = [flag] if '=' in flag else [flag, 'a.txt:12']
+
+                self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_VIM),
+                                 ['+12', 'a.txt'])
+
+    def test_goto_flag_without_line(self):
+        """-g 的取值没有行号：只剩文件（不能把文件一起丢了）"""
+
+        for kind in (edit.CLI_KIND_VIM, edit.CLI_KIND_NANO, edit.CLI_KIND_EMACS, None):
+            with self.subTest(kind):
+                self.assertEqual(edit.cli_argv(['-g', 'a.txt'], kind), ['a.txt'])
+                self.assertEqual(edit.cli_argv(['--goto=a.txt'], kind), ['a.txt'])
+
+    def test_goto_flag_no_longer_blocks_position_goto(self):
+        """vim 系下 -g 不再压制位置参数的翻译（code 系照旧压制，别插第二个 --goto）"""
+
+        args = ['a.txt:3', '-g', 'b.txt:9']
+
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_VIM),
+                         ['+3', 'a.txt', '+9', 'b.txt'])
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
 
     def test_unknown_options_keep_their_place(self):
         """认不出的原样透传，而且位置不变（回退时交给 CLI 的就是它）"""
@@ -465,12 +524,27 @@ class DryRunTest(EditCase):
         self.assertEqual(self.win.requests, [])
 
     def test_cli_line(self):
-        """没有 socket 时 -g 原样交给 CLI（to_argv 不会再插一个 --goto）"""
+        """没有 socket 时交回 CLI：判不出是哪一类的 CLI 不认 -g，只留跳转目标"""
 
         proc = self.run_edit('--dry-run', '-g', self.a + ':3')
 
         self.assertEqual(proc.stdout.split()[0], self.fake_cli)
-        self.assertEqual(proc.stdout.split()[1:3], ['-g', self.a + ':3'])
+        self.assertEqual(proc.stdout.split()[1:], [self.a + ':3'])
+
+    def test_cli_line_code_kind(self):
+        """假 CLI 改叫 buddycn（判成 code 系，自己认 -g）：原样递过去"""
+
+        code_cli = os.path.join(self.dir, 'buddycn')
+
+        with open(code_cli, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_CLI_OUT"\nexit 7\n')
+
+        os.chmod(code_cli, 0o755)
+        self.fake_cli = code_cli
+
+        proc = self.run_edit('--dry-run', '-g', self.a + ':3')
+
+        self.assertEqual(proc.stdout.split(), [code_cli, '-g', self.a + ':3'])
 
 
 class FallbackTest(EditCase):

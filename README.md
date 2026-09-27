@@ -51,7 +51,18 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
 `waitMarkerFilePath`，窗口关掉文件时删它，我们等它消失 —— 和 `remote-cli` 同机制
 （它也是"造 marker + 每秒轮询"），所以当 `$EDITOR` / `core.editor` 用时全程不起 node。
 它是 VS Code 系的选项：交回 vim 系 CLI 时会被摘掉（vim 没有 `--wait`，`-w` 还是
-"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
+"把键入的命令写进文件"的意思；emacsclient 的 `-w` 是 `--timeout=SECONDS`；而
+终端 vim / emacsclient 本来就等到退出）。
+
+`-g` / `--goto` 同样只在 VS Code 系成立：交回 vim 系 CLI 时**翻译**成它的写法
+（`vim +3 f`、`emacsclient +3 f`）—— 不能像 `--wait` 那样摘掉，因为它带着取值
+（vim 的 `-g` 是启动 GUI，会 `E25` 退出 2；emacs 的 `-g` 是 `--geometry`，会把
+后面的文件名吃掉、什么都不打开；nano 的 `-g` 是 `--showcursor`）。认不出是哪
+一类的 CLI 只留跳转目标。
+
+用 `+行号` 的不止 vim：`nano` 是一类、`emacs` 与 `emacsclient` 是一类。列号只有
+vim 不支持：VS Code 系 `--goto 文件:行:列`、emacs 系 `+N:M`、nano `+N,M`
+（都是 1 起，和我们的写法一致），vim 只用 `+N`。
 
 `--list` / `--init --interactive` 会用同一个 socket 直连问每个候选窗口一次只读
 `{"type":"status"}`，从回复的 `Process Argv: --remote <authority> <workspace>` 取得

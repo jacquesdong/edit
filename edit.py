@@ -34,9 +34,12 @@
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，file:行号 原样透传。
-  列号只有 VS Code 系用得上，vim 系先忽略。
+  列号：VS Code 系 --goto 文件:行:列，emacs 系 +N:M，nano +N,M（都是 1 起），
+  vim 不支持（只用 +N）。
   --wait / -w 同理只在 VS Code 系有意义：交回 vim 系 CLI 时会被摘掉（vim 没有
   这个选项，-w 还是"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
+  -g / --goto 也一样只在 VS Code 系成立：交回 vim 系时翻译成 +行号（不能摘，它带着
+  取值；vim -g 是启动 GUI，会 E25 报错），认不出是哪一类的 CLI 只留跳转目标。
 
 原理：在集成终端里 IDE 已经替你准备好两样东西
   * VSCODE_IPC_HOOK_CLI  指向本会话的窗口 socket
@@ -88,9 +91,12 @@ VIM_LIKE = ('vim', 'nvim', 'vi',)
 #
 # VS Code 系，使用 -g/--goto 跳转
 # vim 系, 使用 +行号 跳转
+# nano / emacs 系同样用 +行号，单开一类是因为列号写法不同（见 EMIT）
 CLI_KIND = {}
-CLI_KIND_CODE = 'code'
-CLI_KIND_VIM  = 'vim'
+CLI_KIND_CODE  = 'code'
+CLI_KIND_VIM   = 'vim'
+CLI_KIND_NANO  = 'nano'
+CLI_KIND_EMACS = 'emacs'
 
 for i in CODE_LIKE:
     CLI_KIND[i]   = CLI_KIND_CODE
@@ -99,12 +105,18 @@ CLI_KIND['trae'] = CLI_KIND_CODE
 
 for i in VIM_LIKE:
     CLI_KIND[i] = CLI_KIND_VIM
-# nano 和 emacs 都用 vim 的 +行号 跳转
-CLI_KIND['nano'] = CLI_KIND_VIM
-CLI_KIND['emacs'] = CLI_KIND_VIM
 
+CLI_KIND['nano'] = CLI_KIND_NANO
+
+for i in ('emacs', 'emacsclient'):       # 当 $EDITOR 用的是后者
+    CLI_KIND[i] = CLI_KIND_EMACS
+
+# file:行[:列]：只有末尾的数字才算行列号，非贪婪的 (.+?) 把冒号让给文件名，
+# 所以文件名里带冒号也解析得动（split_goto 用，对应 -g / --goto 的取值）
 GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
+# server 端窗口 socket 的文件名前缀（/run/user/<uid>/vscode-ipc-<uuid>.sock），
+# find_sockets 拿它从 /proc/net/unix 里筛出 IDE 窗口的 socket
 SOCK_PREFIX = 'vscode-ipc-'
 
 # /proc 的根：find_sockets 全程只从这里读，测试可以把它指到假目录
@@ -832,7 +844,7 @@ def has_goto_flag(tokens):
     """
 
     for t in tokens:
-        if t[0] == 'opt' and t[2] == 'gotoLineMode':
+        if t[0] == 'opt' and t[3] == 'goto':
             return True
 
         if t[0] == 'other' and (t[1] in ('-g', '--goto')
@@ -1053,27 +1065,67 @@ def to_msg(tokens, marker=None):
     return msg
 
 
+def plus_goto(file, line, column):
+    """vim 系的行号写法：+行号 放文件前
+
+    vim 的 `+N` 不带列（它靠 `+{命令}` / `-c`），列号参数直接忽略。
+
+    >>> plus_goto('a.txt', '12', '3')
+    ['+12', 'a.txt']
+    """
+
+    return ['+' + line, file]
+
+
+def plus_col(sep):
+    """生成 nano / emacs 系的行号写法：+行号[sep列号]
+
+    列号两家都是 1 起（emacs 29.4 实测 `+3:5` 的光标落在 0 起第 4 列；nano 的 man
+    写"默认是 line 1, column 1"），和我们自己的 `文件:行号:列` 一致，不用 ±1。
+    没给列号就只有 `+行号`。
+
+    >>> plus_col(',')('a.txt', '12', '3')            # nano
+    ['+12,3', 'a.txt']
+    >>> plus_col(':')('a.txt', '12', '3')            # emacs 系
+    ['+12:3', 'a.txt']
+    >>> plus_col(':')('a.txt', '12', None)           # 没给列
+    ['+12', 'a.txt']
+    """
+
+    return lambda file, line, column: ['+' + line + (sep + column if column else ''), file]
+
+
 # 每个 kind 怎么把 token 翻译成命令行 —— "针对不同程序翻译"就这一张表：
 #   goto   : (文件, 行号, 列号) -> 片段列表
 #   wait   : --wait / -w 保不保留
+#   goto_flag : 这类 CLI 自己认 -g / --goto 吗？认得就原样递过去（命令行里已经有
+#               -g 也不再插 --goto）；不认得就按 goto 把 -g 的取值翻一遍
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
 EMIT = {
     CLI_KIND_CODE: {
-        'goto': lambda f, line, c: ['--goto', goto_target((f, line, c))],
+        'goto': lambda file, line, column: ['--goto', goto_target((file, line, column))],
         'wait': True,
+        'goto_flag': True,
         'abspath': True,
     },
     CLI_KIND_VIM: {
-        'goto': lambda f, line, c: ['+' + line, f],
+        'goto': plus_goto,
         'wait': False,
+        'goto_flag': False,             # vim -g 是启动 GUI（E25 报错退出 2）
         'abspath': False,
     },
-}
-
-EMIT_OTHER = {                          # 认不出是哪一类：行号原样透传
-    'goto': lambda f, line, c: [goto_target((f, line, c))],
-    'wait': False,
-    'abspath': False,
+    CLI_KIND_NANO: {
+        'goto': plus_col(','),          # +行号[,列号]
+        'wait': False,
+        'goto_flag': False,             # nano -g 是 --showcursor
+        'abspath': False,
+    },
+    CLI_KIND_EMACS: {
+        'goto': plus_col(':'),          # +行号[:列号]
+        'wait': False,
+        'goto_flag': False,             # emacs -g 是 --geometry，会吃掉后面的文件名
+        'abspath': False,
+    },
 }
 
 
@@ -1090,6 +1142,14 @@ def to_argv(tokens, kind):
     ['-r', '--goto', 'a.txt:12']
     >>> to_argv(tokenize(['-g', 'a.txt:12']), CLI_KIND_CODE)  # 已有 -g 不重复插
     ['-g', 'a.txt:12']
+    >>> to_argv(tokenize(['-g', 'a.txt:12']), CLI_KIND_VIM)   # vim 不认 -g：翻成 +行号
+    ['+12', 'a.txt']
+    >>> to_argv(tokenize(['--goto=a.txt:12']), CLI_KIND_VIM)  # --goto= 同样翻
+    ['+12', 'a.txt']
+    >>> to_argv(tokenize(['-g', 'a.txt']), CLI_KIND_VIM)      # 取值没行号：只剩文件
+    ['a.txt']
+    >>> to_argv(tokenize(['a.txt:3', '-g', 'b.txt:9']), CLI_KIND_VIM)  # 两个都翻
+    ['+3', 'a.txt', '+9', 'b.txt']
     >>> to_argv(tokenize(['--wait', 'a.txt']), CLI_KIND_CODE)
     ['--wait', 'a.txt']
     >>> to_argv(tokenize(['--wait', 'a.txt']), CLI_KIND_VIM)  # vim 没有 --wait
@@ -1100,8 +1160,16 @@ def to_argv(tokens, kind):
     ['--', 'a.txt:12']
     """
 
-    emit = EMIT.get(kind, EMIT_OTHER)
-    rewrite = kind and not has_goto_flag(tokens)
+    unknown = {                             # 认不出是哪一类：行号原样透传
+        'goto': lambda file, line, column: [goto_target((file, line, column))],
+        'wait': False,
+        'goto_flag': False,
+        'abspath': False,
+    }
+
+    emit = EMIT.get(kind, unknown)
+
+    rewrite = kind and (not emit['goto_flag'] or not has_goto_flag(tokens))
     out = []
 
     for t in tokens:
@@ -1118,15 +1186,22 @@ def to_argv(tokens, kind):
                 out.append(goto_target(t[1:]))
 
         else:                               # ('opt', …)
-            _, name, field, _, values, inline = t
+            _opt, flag, field, category, values, orig = t
 
-            if field == WAIT and not emit['wait']:
+            if field == 'wait' and not emit['wait']:
                 continue                    # 这类 CLI 没有 --wait：摘掉
 
-            if inline:                      # --goto=X：照原写法吐回去
-                out.append(inline)
+            if category == 'goto' and not emit['goto_flag']:
+                for v in values:            # 这类 CLI 不认 -g：按它自己的写法翻取值
+                    goto = split_goto(v)
+
+                    out.extend(emit['goto'](*goto) if goto else [v])
+                continue                    # 名字（-g / --goto）丢掉，只留目标
+
+            if orig:                        # --goto=X：照原写法吐回去
+                out.append(orig)
             else:
-                out.append(name)
+                out.append(flag)
                 out.extend(values)
 
     if emit['abspath']:

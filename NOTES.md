@@ -137,8 +137,8 @@ args --tokenize--> [token] --to_msg---> open 报文（socket 后端）
 - `OPTIONS`：名字 -> (报文字段, 取值个数, 取值种类)，认识的参数就这一张表；
 - token 是 tuple：`('opt', …)` / `('goto', 文件, 行号, 列号)` / `('file', …)` /
   `('folder', …)` / `('other', 原文)`；
-- `EMIT`：每个 kind 怎么翻译（goto 写成什么、--wait 保不保留、路径转不转绝对）——
-  "针对不同程序翻译命令"就这一张表；
+- `EMIT`：每个 kind 怎么翻译（goto 写成什么、--wait 保不保留、-g 这类 CLI 自己认
+  不认、路径转不转绝对）—— "针对不同程序翻译命令"就这一张表；
 - 认不出来的（不认识的选项、取值不够的、-- 之后的字面量）一律整成
   `('other', 原文)`：socket 后端见它就返回 None 交回 CLI，CLI 后端原样吐回去。
 
@@ -188,6 +188,9 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 - vim：`vim --wait f` -> `Unknown option argument: "--wait"`，退出 1；
 - 更要命的是 `-w`：vim 里是 `-w <scriptout>`（把键入的命令追加写进文件），
   语义相反还毁文件；
+- emacsclient（29.4 实测）：`--wait` 是 `unrecognized option`，而 `-w` 是
+  `--timeout=SECONDS`（要吃一个数字，跟 vim 的 `-w` 一个性质）；它默认就阻塞
+  等到 server 缓冲区结束，`--wait` 的语义天然满足，摘掉正好；
 - 好消息是终端里的 vim 本来就前台阻塞、退出才返回，等于天然在等，摘掉正好。
   GUI 版（gvim / mvim）会 fork 后立刻返回，那种得 `-f`（foreground）—— 但本机
   `vim -f` 退出 1、`vim -h` 里也没有，那是 GUI 版才有的开关，所以**不翻译**。
@@ -196,6 +199,69 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 nano / emacs 以及认不出来的 CLI（kind 为 None）同样摘。
 
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
+
+### 交回别的 CLI 时把 -g 翻译掉（不是摘掉）
+
+`-g` / `--goto` / `--goto=X` 同样只有 VS Code 系认得，别的 CLI 各有各的灾难：
+
+- vim：`vim -g f` -> `E25: GUI cannot be used: Not enabled at compile time`，退出 2
+  （`-g` 是启动 GUI）；
+- emacs（29.4 实测）：`--help` 写着 `--geometry, -g GEOMETRY`，于是 `-g` 把后面的
+  **文件名吃掉当几何参数** —— `--batch -g f` 里 `(buffer-file-name)` 是 `nil`
+  （不带 `-g` 才是 f）：既不报错也不打开文件，比 vim 的 E25 更隐蔽；
+- emacsclient（29.4 实测）：`unrecognized option '-g'`；
+- nano：`-g` 是 `--showcursor`（"在文件浏览器和帮助里显示光标"），跟跳转无关；
+- 认不出是哪一类的（kind 为 None）：压根没这个选项。
+
+**不能照 `--wait` 那样摘**：`-g` 带着取值，摘掉连文件一起没了。所以按
+`EMIT.goto_flag` 分两类（`--wait` 那张表多加一项）：
+
+- code 系（`goto_flag: True`）：自己认，`-g X` 原样递过去；命令行里已有 `-g` 时
+  我们也不再插 `--goto`（别给两个跳转目标）—— 这是它唯一的作用；
+- 其余（`goto_flag: False`）：**翻译** —— `-g X` 按 `split_goto(X)` 拆成 `+行号 文件`
+  （vim 系写法）或 `X`（认不出的一类，只把 `-g` 丢掉）；拆不出行号就只留 `X`；
+  位置参数 `文件:行号` 恢复翻译（以前被 `-g` 一起压制了，那是为 code 系写的规则）。
+
+真机（`--dry-run`，去掉 socket 才走得到 CLI 路径）：
+
+```
+edit -g /tmp/a.txt:3  ->  /usr/bin/vim  +3 /tmp/a.txt
+                          /usr/bin/nano +3 /tmp/a.txt
+                          /usr/local/bin/emacs       +3 /tmp/a.txt
+                          /usr/local/bin/emacsclient +3 /tmp/a.txt
+                          /usr/bin/ed   /tmp/a.txt:3
+edit -g /tmp/a.txt    ->  /usr/bin/vim  /tmp/a.txt        # 没行号：只留文件
+```
+
+行号写法各家一致（`+N f`），**只有列号不同**：
+
+| kind | 带列吗 | 写法 |
+|---|---|---|
+| code 系 | 带 | `--goto 文件:行:列`（列跟行同一串） |
+| emacs / emacsclient | 带 | `+N:M`（冒号，和我们的 `文件:行号:列` 同源） |
+| nano | 带 | `+N,M`（逗号） |
+| vim | 不带 | `+N`（vim 靠 `+{命令}` / `-c`） |
+
+所以 nano / emacs 各是一个 kind（`CLI_KIND_NANO` / `CLI_KIND_EMACS`），
+`EMIT` 里各挂一个 `plus_col(sep)`。基准两边都是 **1 起**（emacs 29.4 实测
+`+3:5` 的光标落在 0 起第 4 列；nano 的 man 写"默认是 line 1, column 1"），
+和我们自己的 `文件:行号:列` 一致，拼接时不用 ±1。
+
+实测互不兼容（所以必须分开给）：emacs 拿到 `+3,5` 退化到第 1 行，nano 拿到
+`+3:5` 报 `Invalid`。
+
+两个没测到 / 已知不管的：
+
+- nano 的光标列**没实测**（curses 屏抓不到、poslog 也没写出来），只确认了给它
+  `+3,5` 不报错、也不会冒出名为 `+3,5` 的文件；
+- 老版本 nano 可能只认 `+line`，那种会把 `+3,5` 当文件名（打开/新建它）。
+  没法探测版本，**已知不管**。
+
+翻译出来的 `vim +3 f` 真跳：真 pty 下 `call writefile([line(".")], …)` 写出 `3`
+（`-es` 是 ex 模式，光标规则不一样，不能拿它测这个）。
+
+多个文件各带行号（`edit a.txt:3 b.txt:9`）vim 只会把两个 `+N` 依次用在第一个
+buffer 上 —— 只有位置参数的版本里就已经是这样，不是这次引入的。
 
 ### 打开 ≠ 激活（已知限制，别再去找"少发了什么"）
 
