@@ -387,6 +387,51 @@ class MergeTest(EditCase):
                          ['file://' + p for p in (self.a, self.b, self.a, self.b)])
 
 
+class CliArgvTest(EditCase):
+    """CLI 后端：同一份 token 按 kind 翻译成不同的命令行"""
+
+    def test_goto_per_kind(self):
+        """行号：code 插 --goto，vim 用 +行号 前置，认不出的原样"""
+
+        arg = 'a.txt:12'
+
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_CODE), ['--goto', arg])
+        self.assertEqual(edit.cli_argv([arg], edit.CLI_KIND_VIM), ['+12', 'a.txt'])
+        self.assertEqual(edit.cli_argv([arg], None), [arg])
+
+    def test_goto_flag_wins(self):
+        """已经有 -g / --goto 就不再插一个（CLI 自己认得）"""
+
+        for flag in ('-g', '--goto', '--goto=a.txt:12'):
+            with self.subTest(flag):
+                args = [flag] if '=' in flag else [flag, 'a.txt:12']
+
+                self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+
+    def test_unknown_options_keep_their_place(self):
+        """认不出的原样透传，而且位置不变（回退时交给 CLI 的就是它）"""
+
+        self.assertEqual(
+            edit.cli_argv(['--locale', 'zh-cn', '-r', 'a.txt:3'], edit.CLI_KIND_CODE),
+            ['--locale', 'zh-cn', '-r', '--goto', 'a.txt:3'])
+
+    def test_abspath_only_for_code(self):
+        """存在的路径：code 系转绝对（remote-cli 是代理），vim 系保持相对"""
+
+        rel = os.path.relpath(self.a)
+
+        self.assertEqual(edit.cli_argv([rel], edit.CLI_KIND_CODE), [self.a])
+        self.assertEqual(edit.cli_argv([rel], edit.CLI_KIND_VIM), [rel])
+
+    def test_wait_dropped_unless_code(self):
+        self.assertEqual(edit.cli_argv(['--wait', self.a], edit.CLI_KIND_VIM), [self.a])
+        self.assertEqual(edit.cli_argv(['-w', self.a], None), [self.a])
+
+    def test_literal_after_dashdash(self):
+        self.assertEqual(edit.cli_argv(['--', '-w', 'a.txt:3'], edit.CLI_KIND_CODE),
+                         ['--', '-w', 'a.txt:3'])
+
+
 class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""
 
@@ -420,7 +465,7 @@ class DryRunTest(EditCase):
         self.assertEqual(self.win.requests, [])
 
     def test_cli_line(self):
-        """没有 socket 时 -g 原样交给 CLI（apply_goto 也不会再插一个）"""
+        """没有 socket 时 -g 原样交给 CLI（to_argv 不会再插一个 --goto）"""
 
         proc = self.run_edit('--dry-run', '-g', self.a + ':3')
 
@@ -753,9 +798,8 @@ class WaitTest(EditCase):
     def test_wait_kept_for_code_cli(self):
         """VS Code 系认得 --wait：原样交给它（直连翻不出来时它会自己造 marker）"""
 
-        self.assertEqual(edit.drop_wait(['--wait', self.a], edit.CLI_KIND_CODE),
+        self.assertEqual(edit.cli_argv(['--wait', self.a], edit.CLI_KIND_CODE),
                          ['--wait', self.a])
-        self.assertEqual(edit.drop_wait(['--', '--wait'], None), ['--', '--wait'])
 
     def test_wait_marker_returns_when_deleted(self):
         marker = self._touch('marker')

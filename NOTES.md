@@ -123,6 +123,36 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   行为和不装 fzf 时一模一样；
 - `EDIT_FZF=0 / off / never` 显式关（测试里必须关，否则会真拉起一个选择器）。
 
+### 命令行只扫一次：tokenize + 两个后端
+
+早先每个功能各扫一遍命令行（`open_request` 认选项翻报文、`wants_wait` 找 `--wait`、
+`drop_wait` 摘 `--wait`、`apply_goto` / `goto_args` / `abspath_args` / `has_goto`
+再改写一遍给 CLI），加一个选项要动三四处。现在只扫一次：
+
+```
+args --tokenize--> [token] --to_msg---> open 报文（socket 后端）
+                          \-to_argv--> CLI 命令行（CLI 后端，按 kind 查 EMIT）
+```
+
+- `OPTIONS`：名字 -> (报文字段, 取值个数, 取值种类)，认识的参数就这一张表；
+- token 是 tuple：`('opt', …)` / `('goto', 文件, 行号, 列号)` / `('file', …)` /
+  `('folder', …)` / `('other', 原文)`；
+- `EMIT`：每个 kind 怎么翻译（goto 写成什么、--wait 保不保留、路径转不转绝对）——
+  "针对不同程序翻译命令"就这一张表；
+- 认不出来的（不认识的选项、取值不够的、-- 之后的字面量）一律整成
+  `('other', 原文)`：socket 后端见它就返回 None 交回 CLI，CLI 后端原样吐回去。
+
+两条硬约束：
+
+1. **保序**：中间表示是带注释的 token 列表，不是"字段袋" —— 否则
+   `buddycn --locale zh -r f` 会被重排，语义就变了（旧代码里 `apply_goto`
+   "就地成对插"就是在保序，只是这一点藏得太深）。
+2. **原样透传**：认不出来的只能标注、不能报错；连 `--goto=X` 这种内联写法的原文
+   拼写都留在 token 里，回退时照原样交给 CLI。
+
+重构时拿 HEAD 的旧实现逐条对照过：27 组参数 × 2 种 marker × 3 种 kind，两个后端
+的输出**全部一致**；护栏还有 72 个测试 + fixtures（真 CLI 报文快照）。
+
 ### `--wait` 是怎么等的
 
 `remote-cli` 的做法（`server-cli.js`，抓自本机安装目录）：
