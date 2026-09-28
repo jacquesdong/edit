@@ -24,6 +24,8 @@ eval "$(edit --init bash)"   同上（bash / sh / dash）
 
 EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
 edit --list                  列出存活的 IDE 窗口（只读、不读 stdin，会问各窗口 workspace）
+edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；逐条打印
+                             创建时间与路径，--dry-run 只看不删）
 edit --usage                 打印完整用法（--help 是透传给 IDE CLI 的）
 
 edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段

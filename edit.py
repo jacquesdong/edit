@@ -12,6 +12,9 @@
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
   edit --list                  列出存活的 IDE 窗口（只读、不读 stdin，会问各窗口 workspace）
+  edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；
+                               只删 $XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录里的，
+                               挨个打印它的创建时间和路径；--dry-run 只看不删）
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
@@ -78,6 +81,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -85,7 +89,7 @@ import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Literal, TypeAlias, TypedDict
+from typing import Callable, Literal, NamedTuple, TypeAlias, TypedDict
 
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
@@ -501,24 +505,24 @@ case ":$PATH:" in
 esac
 '''.format(env=IPC_HOOK, hook=hook, path=path))
 
-def find_sockets():
-    """列出存活的 vscode-ipc socket 及其归属
+def unix_bind_paths() -> dict[int, str] | None:
+    """读 /proc/net/unix，返回 {inode: socket 路径}（只留 vscode-ipc 那些）
 
-    只对 server 端有意义：桌面版（macOS 的 code / buddycn / trae-cn）根本不产生
-    这种 socket，CLI 自己会复用当前窗口，没有窗口可挑。
-    返回 [{'sock','pid','install','cli'}]；没有 /proc（macOS）时返回 None。
+    这张表就是"还有谁 bind 着"的判据：它只列已 bind 的 socket，天然把残留的 .sock
+    文件滤掉 —— find_sockets 认窗口靠它，--prune 判"死没死"也靠它。
+    没有 /proc（macOS）返回 None。
+
+    字段：Num(带冒号) RefCount Protocol Flags Type St Inode Path，即 Path 从第 8 个字段起。
+    用 Path 前面的那个 inode：它和 socket 文件的 st_ino 不是一个数。
+
+    只切 7 刀，让 Path 原样留在最后一个字段里：路径里可能带空格（XDG_RUNTIME_DIR
+    或 TMPDIR 指向带空格的目录时），用 line.split() 后取 p[-1] / p[7] 都会被截断 ——
+    好在 Path 是最后一列，切够 7 刀就不会误伤。
     """
 
     if not os.path.isdir(PROC):
         return None
 
-    # /proc/net/unix 只列已 bind 的 socket，天然把残留的 .sock 文件滤掉。
-    # 字段：Num(带冒号) RefCount Protocol Flags Type St Inode Path，即 Path 从第 8 个字段起。
-    # 用 Path 前面的那个 inode：它和 socket 文件的 st_ino 不是一个数。
-    #
-    # 只切 7 刀，让 Path 原样留在最后一个字段里：路径里可能带空格（XDG_RUNTIME_DIR
-    # 或 TMPDIR 指向带空格的目录时），用 line.split() 后取 p[-1] / p[7] 都会被截断——
-    # 好在 Path 是最后一列，切够 7 刀就不会误伤。
     ino2sock = {}
     try:
         with open(os.path.join(PROC, 'net', 'unix')) as f:
@@ -532,6 +536,22 @@ def find_sockets():
                     continue
                 ino2sock[int(fields[6])] = fields[7]
     except OSError:
+        return None
+
+    return ino2sock
+
+
+def find_sockets():
+    """列出存活的 vscode-ipc socket 及其归属
+
+    只对 server 端有意义：桌面版（macOS 的 code / buddycn / trae-cn）根本不产生
+    这种 socket，CLI 自己会复用当前窗口，没有窗口可挑。
+    返回 [{'sock','pid','install','cli'}]；没有 /proc（macOS）时返回 None。
+    """
+
+    ino2sock = unix_bind_paths()
+
+    if ino2sock is None:
         return None
 
     found: dict[str, dict[str, str]] = {}
@@ -1467,6 +1487,133 @@ def print_sockets():
 
     print('\n'.join(format_sockets(socks, current_socket())))
 
+
+class PruneResult(NamedTuple):
+    """--prune 的结果：删掉/会删的（带时间）+ 两类跳过的计数 + 删失败的路径"""
+
+    removed: list[tuple[float, str]]    # (mtime, 路径)，按时间升序（最旧的排最前）
+    alive: int                          # 还 bind 着的，没动
+    not_socket: int                     # 名字像但其实是普通文件的，没动
+    failed: list[str]                   # 删失败的（权限之类）
+
+
+def prune_dirs() -> list[str]:
+    """可能放着 vscode-ipc socket 的目录（去重、只留存在的）
+
+    Linux 实测都在 $XDG_RUNTIME_DIR（这台机器 582 个）；$TMPDIR 是 macOS 那边的习惯
+    位置；hook 所在目录兜底 —— 它一定是我们正在用的那个 socket 的家。
+    """
+    cands = [os.environ.get('XDG_RUNTIME_DIR'), os.environ.get('TMPDIR')]
+    hook = current_socket()
+
+    if hook:
+        cands.append(os.path.dirname(hook))
+
+    out = []
+
+    for d in cands:
+        if d and os.path.isdir(d) and d not in out:
+            out.append(d)
+
+    return out
+
+
+def prune_sockets(dry_run: bool = False) -> PruneResult | None:
+    """删掉没人 bind 的 vscode-ipc socket 文件；没有 /proc 时返回 None（一个也不删）
+
+    判据（宁可不删，也别删错）：
+    - 名字是 vscode-ipc-*.sock，而且确实是 socket 文件（S_ISSOCK —— 同名的普通文件不动）；
+    - 路径不在 /proc/net/unix 里，即没人 bind —— 活着的一个都不动；
+    - 只扫 prune_dirs() 那几个目录，不递归；
+    - 读不到目录 / 删不掉（权限）就跳过，记进 failed，不中断。
+
+    "创建时间"用 st_mtime：Linux 上拿不到 st_birthtime（实测 AttributeError），而 socket
+    文件 bind 之后没人再写它 —— 实测收发一次数据，mtime / ctime 都不变，所以 mtime 就是
+    bind 那一刻。
+    """
+    bound = unix_bind_paths()
+
+    if bound is None:
+        return None
+
+    alive_paths = set(bound.values())
+    alive = not_socket = 0
+    removed: list[tuple[float, str]] = []
+    failed: list[str] = []
+
+    for d in prune_dirs():
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue                    # 目录读不到就跳过
+
+        for name in names:
+            if not (name.startswith(SOCK_PREFIX) and name.endswith('.sock')):
+                continue
+
+            path = os.path.join(d, name)
+
+            try:
+                st = os.lstat(path)     # lstat：万一同名的是个软链，也别顺着走
+            except OSError:
+                continue
+
+            if not stat.S_ISSOCK(st.st_mode):
+                not_socket += 1
+                continue
+
+            if path in alive_paths:
+                alive += 1
+                continue
+
+            if not dry_run:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    failed.append(path)
+                    continue
+
+            removed.append((st.st_mtime, path))
+
+    removed.sort()
+    return PruneResult(removed, alive, not_socket, failed)
+
+
+def format_prune(result: PruneResult, dry_run: bool) -> list[str]:
+    """把 prune 的结果渲染成要打印的行（时间在前，最旧的排最前）
+
+    >>> r = PruneResult([(1782300000.0, '/r/vscode-ipc-a.sock')], 3, 1, [])
+    >>> format_prune(r, True)[0].endswith('  /r/vscode-ipc-a.sock')
+    True
+    >>> format_prune(r, True)[1:]
+    ['共 1 个会删；跳过 3 个活着的、1 个不是 socket 文件', '（--dry-run：没有真删）']
+    >>> format_prune(r, False)[1:]
+    ['已删除 1 个；跳过 3 个活着的、1 个不是 socket 文件']
+    """
+    lines = ['%s  %s' % (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(m)), p)
+             for m, p in result.removed]
+
+    if dry_run:
+        lines.append('共 %d 个会删；跳过 %d 个活着的、%d 个不是 socket 文件'
+                     % (len(result.removed), result.alive, result.not_socket))
+        lines.append('（--dry-run：没有真删）')
+    else:
+        lines.append('已删除 %d 个；跳过 %d 个活着的、%d 个不是 socket 文件'
+                     % (len(result.removed), result.alive, result.not_socket))
+
+    lines.extend('! 删不掉：%s' % p for p in result.failed)
+
+    return lines
+
+
+def print_prune(dry_run: bool = False) -> None:
+    result = prune_sockets(dry_run)
+
+    if result is None:
+        sys.exit('edit --prune: 没有 %s，判断不了哪个 socket 还活着 —— 一个也没删' % PROC)
+
+    print('\n'.join(format_prune(result, dry_run)))
+
 def pick_socket(socks, answer, hook=None):
     """把用户输入解释成候选项；认不出返回 None
 
@@ -1632,6 +1779,7 @@ def build_args():
 
     parser.add_argument('--init', choices=['fish', 'bash'])
     parser.add_argument('--list', action='store_true')
+    parser.add_argument('--prune', action='store_true')
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
@@ -1647,6 +1795,17 @@ def main():
         if args:
             sys.exit('edit --usage 不接受文件参数')
         print_usage()
+        return
+
+    # --prune 和打开文件无关，放在最早：它不碰 tokens，也不该被后面那些检查影响
+    if flags.prune:
+        if args:
+            sys.exit('edit --prune 不接受文件参数')
+
+        if flags.init or flags.list or flags.interactive:
+            sys.exit('edit --prune 只清死 socket，不和 --init / --list / --interactive 一起用')
+
+        print_prune(flags.dry_run)
         return
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv（纯函数，先扫出来）

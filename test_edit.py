@@ -964,6 +964,137 @@ class FindSocketsTest(ProcCase):
             self.assertIsNone(edit.find_sockets())
 
 
+class PruneTest(ProcCase):
+    """--prune：只删没人 bind 的 vscode-ipc socket，活着的一个都不动
+
+    安全第一：这些用例一律把 prune_dirs 锁死在临时目录里（patch 掉），真实的
+    $XDG_RUNTIME_DIR 一个 socket 都不许碰 —— 唯一的"真删"路径也只扫临时目录。
+    """
+
+    def dead_sock(self, name):
+        """造一个"死了的" socket 文件：bind 过、名字还在、没人再管它"""
+
+        path = os.path.join(self.dir, name)
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        s.close()                       # 名字留下（正是残留文件的样子）
+        return path
+
+    def prune(self, dry_run=False):
+        """跑一次 prune_sockets：假 /proc + 只扫 self.dir"""
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(edit, 'PROC', self.proc))
+            stack.enter_context(patch.object(edit, 'prune_dirs', lambda: [self.dir]))
+            return edit.prune_sockets(dry_run)
+
+    def test_removes_dead_keeps_alive(self):
+        """活着的（假 /proc 里 bind 着）不动；死掉的删掉；同名的普通文件不动"""
+
+        alive = self.dead_sock('vscode-ipc-1.sock')     # sock1：make_proc 里 bind 着
+        dead = self.dead_sock('vscode-ipc-dead.sock')   # 不在 net/unix 里
+        plain = os.path.join(self.dir, 'vscode-ipc-plain.sock')
+
+        with open(plain, 'w'):
+            pass
+
+        result = self.prune()
+
+        self.assertEqual([p for _, p in result.removed], [dead])
+        self.assertEqual((result.alive, result.not_socket, result.failed), (1, 1, []))
+        self.assertFalse(os.path.exists(dead))
+        self.assertTrue(os.path.exists(alive))
+        self.assertTrue(os.path.exists(plain))
+
+    def test_dry_run_removes_nothing(self):
+        """--dry-run：照样列出会删哪些，但一个都不删"""
+
+        dead = self.dead_sock('vscode-ipc-dead.sock')
+
+        result = self.prune(dry_run=True)
+        text = '\n'.join(edit.format_prune(result, True))
+
+        self.assertEqual([p for _, p in result.removed], [dead])
+        self.assertIn(dead, text)
+        self.assertIn('（--dry-run：没有真删）', text)
+        self.assertTrue(os.path.exists(dead))
+
+    def test_sorted_oldest_first(self):
+        """按 mtime 升序：最该删的（最旧）排最前"""
+
+        young = self.dead_sock('vscode-ipc-young.sock')
+        old = self.dead_sock('vscode-ipc-old.sock')
+
+        os.utime(old, (1_600_000_000, 1_600_000_000))       # 2020-09
+        os.utime(young, (1_700_000_000, 1_700_000_000))     # 2023-11
+
+        result = self.prune(dry_run=True)
+
+        self.assertEqual([p for _, p in result.removed], [old, young])
+        self.assertTrue(edit.format_prune(result, True)[0].startswith('2020-'))
+
+    def test_ignores_other_names(self):
+        """名字不带 vscode-ipc- 或不以 .sock 结尾的，碰都不碰"""
+
+        other = self.dead_sock('other.sock')
+        prefixed = self.dead_sock('vscode-ipc-noext')
+
+        result = self.prune()
+
+        self.assertEqual(result.removed, [])
+        self.assertTrue(os.path.exists(other))
+        self.assertTrue(os.path.exists(prefixed))
+
+    def test_prune_dirs(self):
+        """候选目录：$XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录 —— 去重，只留存在的"""
+
+        env = {edit.IPC_HOOK: os.path.join(self.dir, 'hook.sock'),
+               'XDG_RUNTIME_DIR': self.dir,
+               'TMPDIR': os.path.join(self.dir, 'no-such')}
+
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(edit.prune_dirs(), [self.dir])
+
+        # 没有 XDG_RUNTIME_DIR 时靠 hook 所在目录兜底
+        with patch.dict(os.environ, {edit.IPC_HOOK: os.path.join(self.dir, 'hook.sock')},
+                        clear=True):
+            self.assertEqual(edit.prune_dirs(), [self.dir])
+
+    def test_no_proc(self):
+        """没有 /proc：prune_sockets 返回 None，print_prune 报错退出（一个也不删）"""
+
+        with patch.object(edit, 'PROC', os.path.join(self.dir, 'no-such')):
+            self.assertIsNone(edit.prune_sockets())
+
+            with self.assertRaises(SystemExit) as ctx:
+                edit.print_prune()
+
+        self.assertIn('没有', str(ctx.exception))
+
+    def test_rejects_files_and_conflicts(self):
+        """--prune 不接受文件参数，也不和 --init / --list / --interactive 一起用"""
+
+        for argv in (('--prune', 'a.txt'), ('--prune', '--list'),
+                     ('--prune', '--interactive'), ('--prune', '--init', 'fish')):
+            with self.subTest(argv):
+                _, _, code = self.run_main(*argv)
+
+                self.assertTrue(str(code).startswith('edit --prune'), code)
+
+    def test_main_dry_run(self):
+        """走一遍 main：--prune --dry-run 打印清单，退出码 0，文件还在"""
+
+        dead = self.dead_sock('vscode-ipc-dead.sock')
+
+        with patch.object(edit, 'prune_dirs', lambda: [self.dir]):
+            out, err, code = self.run_main('--prune', '--dry-run')
+
+        self.assertEqual(code, 0)
+        self.assertIn(dead, out)
+        self.assertIn('（--dry-run：没有真删）', out)
+        self.assertTrue(os.path.exists(dead))
+
+
 class ProbeTest(ProcCase):
     """status 探测：真给假窗口发一次请求，把 workspace 填回候选"""
 

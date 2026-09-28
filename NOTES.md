@@ -380,6 +380,24 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
   `parse_status()`；本地窗口没有 `--remote`，那就认不出来）。8 个窗口约 0.3s
   （线程池 ≤8，单个 1.5s 超时），失败显示 `?`。
 
+### `--prune`：清掉死掉的 socket
+
+IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，于是
+`$XDG_RUNTIME_DIR` 里会越攒越多（这台机器 582 个，只有 3 个还活着）。判"死"用的
+就是 `find_sockets()` 那份数据 —— 抽成了 `unix_bind_paths()`，两边共用一份解析：
+
+- 名字是 `vscode-ipc-*.sock` **且** `S_ISSOCK`（同名的普通文件不动）**且**路径不在
+  `/proc/net/unix` 里（还 bind 着一个都不动）；只扫 `$XDG_RUNTIME_DIR` / `$TMPDIR` /
+  hook 所在目录，不递归；没有 `/proc`（macOS）直接报错退出，一个也不删。
+- **不能拿 connect 探测判死**：实测刚 `bind()` 还没 `listen()` 的 unix socket，
+  `connect()` 直接 `ECONNREFUSED` —— 和"文件已死"完全一样的错。所以只信 `/proc/net/unix`。
+- 显示的"创建时间"是 `st_mtime`：Linux 上 `st_birthtime` 拿不到（实测 AttributeError），
+  而 socket 文件 bind 之后没人再写它（实测收发数据后 mtime / ctime 都不变），
+  所以 mtime 就是 bind 那一刻。
+- `--dry-run` 复用既有开关：同一份清单，末尾换成"（--dry-run：没有真删）"。
+- **测试的安全线**：`PruneTest` 一律把 `prune_dirs` patch 成临时目录 —— 真实
+  `$XDG_RUNTIME_DIR` 一个 socket 都不许碰（唯一的真删路径也只扫临时目录）。
+
 试过但**没采用**的两条路：
 
 - 持有 socket 的 server 进程的 `/proc/<pid>/cwd`：实测是 `$HOME` 或安装目录，没辨识价值；
