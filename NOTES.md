@@ -209,9 +209,10 @@ vim 9.1 / nano 7.2 / emacs 29.4 / emacsclient 29.4）：
 | `-w` | `-w <scriptout>`：把命令写进文件 | — | — | `--timeout=SECONDS`（要数字） |
 | `--wait` | 未知选项，报错 | — | 未知选项，报错 | 未知选项，报错 |
 
-于是 `EMIT` 里**一个选项一项**（`wait` / `reuse_window` / `new_window` / `add` /
-`diff` / `merge`，不共用 —— 每项在别的 CLI 里的含义都不同，逐项的注释就是上面这张
-表），认不出就摘掉。两个例外：
+于是 `EMIT` 里**一个选项一项**（键就是 token 的 `field` 名：`wait` /
+`forceReuseWindow` / `forceNewWindow` / `addMode` / `diffMode` / `mergeMode`，
+不共用 —— 每项在别的 CLI 里的含义都不同，逐项的注释就是上面这张表；同名是刻意的，
+`to_argv` 里 `emit[field]` 直接查表），认不出就摘掉。两个例外：
 
 - `-d` 对 vim 是**正解**（`vim -d a b` = vimdiff），所以 vim 那一项是 True、保留；
 - `-m`（合并，带 4 个路径）没有等价物：**丢开关、留取值** —— 那四个路径照样当文件
@@ -450,9 +451,12 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
      `uv run mypy` 干净。它顺带抓出并修掉：test 里 `spec` 可能是 None、
      `SystemExit.code` 的类型、`lambda: … and os.unlink(…)`（返回 None 还当值用）、
      `capture_cli` 的 `out` 被推成 `dict[str, str]`。
-   - 还剩两件（都不急）：1）`to_argv` 那串 `if field == 'wait' and not emit['wait']`
-     可以并进 `EMIT` 查表 —— 前提是先统一 `field`（`wait` / `addMode`…）与 EMIT 键
-     （`wait` / `reuse_window`…）的命名；2）`--strict` 还有 91 条，要上得另开一轮。
+   - 收尾（`988a52e` 之后）：EMIT 那 6 个开关键改成与 token 的 `field` 同名
+     （`reuse_window` → `forceReuseWindow`、`add` → `addMode`…），于是 `to_argv` 里
+     6 条 `if field == … and not emit[…]` 收成 `if not emit[field]:`（加一个开关只需要
+     往 EMIT 那几行加一项）。类型上正好对上：`field: OptionField` 那 6 个字面量 =
+     `EmitRow` 的 6 个布尔键。
+   - 还剩一件（不急）：`--strict` 还有 91 条，要上得另开一轮。
    - 门槛提醒仍然成立：`match` 是 3.9 的**语法错误**，解析期就炸、程序内做不了友好
      提示（README 开头已写明最低 3.10）；本机只有 3.12，旧版本机器没法实测。
 

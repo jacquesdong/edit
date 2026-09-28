@@ -1219,11 +1219,11 @@ class EmitRow(TypedDict):
 
     goto: Callable[[GotoTarget], list[str]]
     wait: bool
-    reuse_window: bool
-    new_window: bool
-    add: bool
-    diff: bool
-    merge: bool
+    forceReuseWindow: bool
+    forceNewWindow: bool
+    addMode: bool
+    diffMode: bool
+    mergeMode: bool
     abspath: bool
 
 
@@ -1232,50 +1232,52 @@ class EmitRow(TypedDict):
 #            多份 —— 实测 CLI 的 -g 可以重复，报文是累加的）。三种形状各是一个函数：
 #            goto_inline（目标与路径同一个串）/ goto_plus（+N 放文件名前）/
 #            goto_file（认不出：只留文件）
-#   wait / reuse_window / new_window / add / diff / merge
+#   那 6 个开关（键就是 token 的 field 名：wait / forceReuseWindow /
+#   forceNewWindow / addMode / diffMode / mergeMode）
 #          : 这类 CLI 认不认这个 VS Code 系开关。认就原样递过去，不认就摘掉
-#            （merge 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
-#            这几个短选项在别的 CLI 里各有别解，每项的注释就是实测记录
+#            （mergeMode 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
+#            这几个短选项在别的 CLI 里各有别解，每项的注释就是实测记录。
+#            键名与 token 的 field 同名是刻意的：to_argv 里 emit[field] 直接查表
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
 EMIT: dict[str, EmitRow] = {
     CLI_KIND_CODE: {
         'goto': goto_inline('--goto'),
         'wait': True,
-        'reuse_window': True,
-        'new_window': True,
-        'add': True,
-        'diff': True,
-        'merge': True,
+        'forceReuseWindow': True,
+        'forceNewWindow': True,
+        'addMode': True,
+        'diffMode': True,
+        'mergeMode': True,
         'abspath': True,
     },
     CLI_KIND_VIM: {
         'goto': goto_plus(None),        # vim -g 是启动 GUI（E25 退出 2），绝不能透传
         'wait': False,                  # -w 是把键入的命令写进 scriptout
-        'reuse_window': False,          # -r 是列/恢复交换文件
-        'new_window': False,            # -n 是不用交换文件
-        'add': False,                   # -a 是未知选项：Unknown option argument
-        'diff': True,                   # -d 正是 diff 模式（vimdiff），等价，保留
-        'merge': False,                 # -m 是禁止写文件
+        'forceReuseWindow': False,      # -r 是列/恢复交换文件
+        'forceNewWindow': False,        # -n 是不用交换文件
+        'addMode': False,               # -a 是未知选项：Unknown option argument
+        'diffMode': True,               # -d 正是 diff 模式（vimdiff），等价，保留
+        'mergeMode': False,             # -m 是禁止写文件
         'abspath': False,
     },
     CLI_KIND_NANO: {
         'goto': goto_plus(','),         # nano -g 是 --showcursor
         'wait': False,                  # 没有 --wait
-        'reuse_window': False,          # -r <数字>：把文件名当填充宽度
-        'new_window': False,            # -n 是 --noread：只写不读
-        'add': False,                   # -a 是 --atblanks
-        'diff': False,                  # -d 是 --rebinddelete
-        'merge': False,                 # -m 是 --mouse
+        'forceReuseWindow': False,      # -r <数字>：把文件名当填充宽度
+        'forceNewWindow': False,        # -n 是 --noread：只写不读
+        'addMode': False,               # -a 是 --atblanks
+        'diffMode': False,              # -d 是 --rebinddelete
+        'mergeMode': False,             # -m 是 --mouse
         'abspath': False,
     },
     CLI_KIND_EMACS: {
         'goto': goto_plus(':'),         # emacs -g 是 --geometry，会吃掉文件名
         'wait': False,                  # emacsclient 的 -w 是 --timeout=SECONDS
-        'reuse_window': False,          # emacs -r 是 -rv 反色；emacsclient -r 是 --reuse-frame
-        'new_window': False,            # emacs 报未知选项；emacsclient -n 是 --no-wait
-        'add': False,                   # 报未知选项（emacsclient 的 -a 还要参数）
-        'diff': False,                  # -d 是 --display，会吃掉文件名
-        'merge': False,                 # 报未知选项（emacsclient 也不认）
+        'forceReuseWindow': False,      # emacs -r 是 -rv 反色；emacsclient -r 是 --reuse-frame
+        'forceNewWindow': False,        # emacs 报未知选项；emacsclient -n 是 --no-wait
+        'addMode': False,               # 报未知选项（emacsclient 的 -a 还要参数）
+        'diffMode': False,              # -d 是 --display，会吃掉文件名
+        'mergeMode': False,             # 报未知选项（emacsclient 也不认）
         'abspath': False,
     },
 }
@@ -1325,11 +1327,11 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
     unknown: EmitRow = {
         'goto': goto_file,              # 认不出是哪一类：只传文件，行号丢掉
         'wait': False,
-        'reuse_window': False,
-        'new_window': False,
-        'add': False,
-        'diff': False,
-        'merge': False,
+        'forceReuseWindow': False,
+        'forceNewWindow': False,
+        'addMode': False,
+        'diffMode': False,
+        'mergeMode': False,
         'abspath': False,
     }
 
@@ -1349,19 +1351,11 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
 
             case ('opt', flag, field, values):
                 # 这几个开关是 VS Code 系独有的"打开方式"，别的 CLI 拿到各有别解
-                # （逐项见 EMIT 里那几行注释）：不认就摘掉。各选项各自一项，不共用。
-                if field == 'wait' and not emit['wait']:
-                    continue
-                if field == 'forceReuseWindow' and not emit['reuse_window']:
-                    continue
-                if field == 'forceNewWindow' and not emit['new_window']:
-                    continue
-                if field == 'addMode' and not emit['add']:
-                    continue
-                if field == 'diffMode' and not emit['diff']:
-                    continue
-                if field == 'mergeMode' and not emit['merge']:
-                    out.extend(values)      # 合并没有等价物：丢开关，四个路径照开
+                # （逐项见 EMIT 里那几行注释）：不认就摘掉。EMIT 的键与 field 同名，
+                # 所以这里直接查表 —— 加一个开关只需要往 EMIT 那几行里加一项。
+                if not emit[field]:
+                    if field == 'mergeMode':
+                        out.extend(values)  # 合并没有等价物：丢开关，四个路径照开
                     continue
 
                 out.append(flag)
