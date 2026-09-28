@@ -1,0 +1,37 @@
+# 这份文件只当**配置容器**：不是要发布的包 —— 没有 [build-system]、没有
+# [project.scripts]。产品形态是"单文件 + ~/.local/bin/edit 软链 + dotfiles 里那份
+# 手动同步"（见 README）：运行期零第三方依赖，跑的是系统 python3。
+# 所以 [project] 只声明元数据，够 uv / ruff 读懂就行。
+
+[project]
+name = "edit"                   # 占位（PEP 621 必填），不代表要发布
+version = "0.0.1"               # 同上
+description = "在当前 IDE 窗口打开文件（可带 文件:行号[:列]）"
+requires-python = ">=3.10"      # 有意收紧：token 分派要换 match（PEP 634，3.10 起）。
+                                # 纯语法下限其实更低（shlex.join -> 3.8），这是主动选择；
+                                # 3.9 上 match 是 SyntaxError，文件里没法做友好提示
+dependencies = []
+
+[tool.ruff]
+# target-version 与 requires-python 对齐：ruff 靠它决定能推荐/接受哪些语法
+target-version = "py310"
+# 最长行 101 列（一处 --usage docstring 的续行）。E501 不在下面 select 里，
+# 所以这个值现在只表达意图；真要启用 E501 得先折那 4 行（>88 的都在 docstring/注释里）
+line-length = 100
+
+[tool.ruff.lint]
+# 显式写下来 = 不再跟 ruff 的默认值走。这就是**当前**的默认集（语法级 + 拼写级错误），
+# 所以这次"写下来"不产生任何新报告。想加规则就往这行加，例如 bugbear(B)、
+# simplify(SIM)、RUF、pylint(PLW)。
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+# 只配置、不运行 —— README "开发"一节写了为什么不用 ruff format
+# （全量重排 600+ 行，会打散魔尾逗号与等号对齐）
+quote-style = "single"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "ruff>=0.16.9",
+]

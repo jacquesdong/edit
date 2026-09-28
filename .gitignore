@@ -1,2 +1,6 @@
 __pycache__/
-*.pyc
+*.py[oc]
+
+.ruff_cache/
+
+.venv/

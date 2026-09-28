@@ -8,6 +8,10 @@
 
 背景、协议细节（怎么抓包、字段怎么映射）与待办见 [NOTES.md](NOTES.md)。
 
+需要 **Python 3.10+**（`requires-python` 在 `pyproject.toml` 里）—— token 分派要改写成
+`match`（PEP 634），有意把下限从 3.8 抬到 3.10。3.9 上 `match` 是**语法错误**：在那一行
+直接 `SyntaxError`，解析期就炸，程序里做不了"版本太低"的友好提示，换机器时留意这条。
+
 ## 用法
 
 ```
@@ -90,19 +94,26 @@ vim 不支持：VS Code 系 `--goto 文件:行:列`、emacs 系 `+N:M`、nano `+
 
 ## 开发
 
+dev 工具（ruff / mypy）钉在 `uv.lock` 里，命令一律走 `uv run`（首次会自动建 `.venv`）：
+
 ```bash
-python3 edit.py --self-test      # 纯函数 doctest（不开窗口、毫秒级）
-python3 test_edit.py -v          # 回归：假窗口 + 假 CLI，不碰真实 IDE
-ruff check .                     # 用仓库里的 ruff.toml
-python3 -m doctest tools/capture_cli.py   # 抓包工具的 doctest
+uv sync                          # 建 .venv 并按 uv.lock 装 ruff / mypy（首次，之后可省）
+uv run ruff check .              # 0.16.9，配置在 pyproject.toml 的 [tool.ruff]
+uv run python3 edit.py --self-test      # 纯函数 doctest（不开窗口、毫秒级）
+uv run python3 test_edit.py -v          # 回归：假窗口 + 假 CLI，不碰真实 IDE
+uv run python3 -m doctest tools/capture_cli.py   # 抓包工具的 doctest
 
 # 手动（要真 IDE 的 CLI）：把 CLI 自己发的报文抓进 fixtures/protocol.json
-python3 tools/capture_cli.py --name open-goto -- /tmp/a.txt:3
+uv run python3 tools/capture_cli.py --name open-goto -- /tmp/a.txt:3
 ```
+
+不想用 uv 也行：直接用系统 `ruff` / `python3` 跑同样的命令，只是版本可能不是 lock
+里那份（`ruff check` 的配置仍读 `pyproject.toml`）。
 
 只跑 `ruff check`，**没有采用 `ruff format`**：仓库故意用了魔尾逗号（`[cli,]`）
 和等号对齐（`CLI_KIND_VIM  = 'vim'`）这类写法，格式化会把它们拆开/压平
-（全量重排约 225 行，纯格式、无语义变化）。要统一得先接受那次全量重排。
+（ruff 0.16.9 实测全量重排 507 行：`edit.py` 253 / `test_edit.py` 215 / `tools` 39，
+纯格式、无语义变化）。要统一得先接受那次全量重排。
 
 `test_edit.py` 里的 `FakeWindow` 会起一个真的 AF_UNIX server 假装成 IDE 窗口，
 因此"发出去的报文""HTTP 500 时回退 CLI""窗口连上就断"这些都能确定性测到，

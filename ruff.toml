@@ -1,6 +1,0 @@
-# 顶层 exclude 对 ruff check 与 ruff format 都生效；
-# [format] 段只认 indent-style / quote-style / skip-magic-trailing-comma 等
-extend-exclude = ["vim/", "nvim/", "fish/"]
-
-[format]
-quote-style = "single"      # 尽量单引号
