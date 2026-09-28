@@ -85,7 +85,7 @@ import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, TypedDict
 
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
@@ -1070,7 +1070,26 @@ def nothing_to_open(tokens):
     return True
 
 
-def to_msg(tokens: list[Token], marker: str | None = None):
+# open 报文的形状（字段名是上游 CLI 的；报文示例见 NOTES 开头那段）。
+# waitMarkerFilePath 只在带 --wait 且造出 marker 时才出现 —— 用 total=False 继承表达
+# "选填"（typing.NotRequired 是 3.11+，不引 typing_extensions）
+class _OpenMsgBase(TypedDict):
+    type: Literal['open']
+    fileURIs: list[str]
+    folderURIs: list[str]
+    diffMode: bool
+    mergeMode: bool
+    addMode: bool
+    gotoLineMode: bool
+    forceReuseWindow: bool
+    forceNewWindow: bool
+
+
+class OpenMsg(_OpenMsgBase, total=False):
+    waitMarkerFilePath: str
+
+
+def to_msg(tokens: list[Token], marker: str | None = None) -> OpenMsg | None:
     """token -> open 报文（socket 后端）
 
     见到 ('other', …) 就返回 None —— 交回 CLI：认不出来的我们不猜，让 CLI 自己
@@ -1092,7 +1111,7 @@ def to_msg(tokens: list[Token], marker: str | None = None):
     True
     """
 
-    msg = {
+    msg: OpenMsg = {
         'type': 'open',
         'fileURIs': [],
         'folderURIs': [],
@@ -1105,33 +1124,32 @@ def to_msg(tokens: list[Token], marker: str | None = None):
     }
 
     for t in tokens:
-        if t[0] == 'other':
-            return None                     # 认不出来：交回 CLI
+        match t:
+            case ('other', _):
+                return None                 # 认不出来：交回 CLI
 
-        elif t[0] == 'file':
-            msg['fileURIs'].append(file_uri(t[1]))
+            case ('file', path):
+                msg['fileURIs'].append(file_uri(path))
 
-        elif t[0] == 'folder':
-            msg['folderURIs'].append(file_uri(t[1]))
+            case ('folder', path):
+                msg['folderURIs'].append(file_uri(path))
 
-        elif t[0] == 'goto':
-            msg['fileURIs'].append(file_uri(*t[1:]))
-            msg['gotoLineMode'] = True
+            case ('goto', file, line, col):
+                msg['fileURIs'].append(file_uri(file, line, col))
+                msg['gotoLineMode'] = True
 
-        else:                               # ('opt', …)
-            _opt, _flag, field, values = t
+            case ('opt', _flag, field, values):
+                if field == 'wait':
+                    if not marker:
+                        return None         # 没造 marker：交回 CLI（它自己造）
 
-            if field == 'wait':
-                if not marker:
-                    return None             # 没造 marker：交回 CLI（它自己造）
+                    msg['waitMarkerFilePath'] = marker
+                    continue
 
-                msg['waitMarkerFilePath'] = marker
-                continue
+                msg[field] = True           # field 已窄化成剩下那 5 个开关
 
-            msg[field] = True
-
-            for v in values:
-                msg['fileURIs'].append(file_uri(v))
+                for v in values:
+                    msg['fileURIs'].append(file_uri(v))
 
     if marker and not msg['fileURIs']:
         return None                         # CLI 要求 --wait 至少带一个文件
