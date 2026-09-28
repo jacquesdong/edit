@@ -85,7 +85,7 @@ import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, TypeAlias, TypedDict
+from typing import Callable, Literal, TypeAlias, TypedDict
 
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
@@ -369,7 +369,7 @@ def cli_kind(cli):
 
     return None
 
-def split_goto(arg: str) -> tuple[str, str, str | None] | None:
+def split_goto(arg: str) -> GotoTarget | None:
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
     和 parse_goto 的差别：不做"真实文件优先"的判断。parse_goto 靠它把行号/列号
@@ -396,7 +396,7 @@ def split_goto(arg: str) -> tuple[str, str, str | None] | None:
 
     return m.group(1), m.group(2), m.group(3)
 
-def parse_goto(arg: str) -> tuple[str, str, str | None] | None:
+def parse_goto(arg: str) -> GotoTarget | None:
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
     真实存在的文件优先（文件名里可以带冒号）；目录配行号没有意义。
@@ -424,7 +424,7 @@ def parse_goto(arg: str) -> tuple[str, str, str | None] | None:
 
     return split_goto(arg)
 
-def goto_target(goto):
+def goto_target(goto: GotoTarget) -> str:
     """(文件, 行号, 列号) 拼回 文件:行:列
 
     只给 code 系用：作 `--goto` 的取值（每个目标一份，实测 CLI 的 `-g` 可重复）。
@@ -762,6 +762,8 @@ OptionField: TypeAlias = Literal[
 
 OptToken: TypeAlias = tuple[Literal['opt'], str, OptionField, list[str]]
 GotoToken: TypeAlias = tuple[Literal['goto'], str, str, str | None]
+GotoTarget: TypeAlias = tuple[str, str, str | None]     # 跳转目标本身（不带 'goto' 标签）：
+                                                       # goto_target / emit['goto'] 吃这个
 FileToken: TypeAlias = tuple[Literal['file'], str]
 FolderToken: TypeAlias = tuple[Literal['folder'], str]
 OtherToken: TypeAlias = tuple[Literal['other'], str]
@@ -1160,7 +1162,7 @@ def to_msg(tokens: list[Token], marker: str | None = None) -> OpenMsg | None:
     return msg
 
 
-def goto_inline(flag):
+def goto_inline(flag: str) -> Callable[[GotoTarget], list[str]]:
     """inline 形状：跳转目标与路径是同一个串（`--goto f:3:5`）
 
     >>> goto_inline('--goto')(('a.txt', '12', '3'))
@@ -1170,7 +1172,7 @@ def goto_inline(flag):
     return lambda goto: [flag, goto_target(goto)]
 
 
-def goto_plus(sep):
+def goto_plus(sep: str | None) -> Callable[[GotoTarget], list[str]]:
     """plus 形状：`+行号[sep列号]` 放在文件名前（vim / nano / emacs）
 
     `sep` 是列号的分隔符 —— vim 不支持列（`sep=None`，只用 `+行号`），nano 是 `,`，
@@ -1192,7 +1194,7 @@ def goto_plus(sep):
                          goto[0]]
 
 
-def goto_file(goto):
+def goto_file(goto: GotoTarget) -> list[str]:
     """认不出是哪一类：只传文件，行号丢掉
 
     不知道对面认不认 `文件:行号`，把 `f:3` 当文件名递过去可能什么都打不开，所以只
@@ -1205,6 +1207,23 @@ def goto_file(goto):
     return [goto[0]]
 
 
+class EmitRow(TypedDict):
+    """EMIT 表的一行：goto 是"跳转目标 -> 片段"，其余项是"这个开关认不认"
+
+    TypedDict 而不是普通 dict：不然 mypy 只知道值是 object，连 emit['goto'] 可不可
+    调用都判不了（`--check-untyped-defs` 实测报 "object not callable"）。
+    """
+
+    goto: Callable[[GotoTarget], list[str]]
+    wait: bool
+    reuse_window: bool
+    new_window: bool
+    add: bool
+    diff: bool
+    merge: bool
+    abspath: bool
+
+
 # 每个 kind 怎么把 token 翻译成命令行 —— "针对不同程序翻译"就这一张表：
 #   goto   : 吃一个跳转目标 (文件, 行号, 列号) -> 片段列表（一个目标一次，多目标就
 #            多份 —— 实测 CLI 的 -g 可以重复，报文是累加的）。三种形状各是一个函数：
@@ -1215,7 +1234,7 @@ def goto_file(goto):
 #            （merge 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
 #            这几个短选项在别的 CLI 里各有别解，每项的注释就是实测记录
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
-EMIT = {
+EMIT: dict[str, EmitRow] = {
     CLI_KIND_CODE: {
         'goto': goto_inline('--goto'),
         'wait': True,
@@ -1300,7 +1319,7 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
     ['--', 'a.txt:12']
     """
 
-    unknown = {
+    unknown: EmitRow = {
         'goto': goto_file,              # 认不出是哪一类：只传文件，行号丢掉
         'wait': False,
         'reuse_window': False,
@@ -1315,36 +1334,35 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
     out: list[str] = []
 
     for t in tokens:
-        if t[0] == 'other':
-            out.append(t[1])                # 认不出来的原样透传
+        match t:
+            case ('other', orig):
+                out.append(orig)            # 认不出来的原样透传
 
-        elif t[0] in ('file', 'folder'):
-            out.append(t[1])
+            case ('file' | 'folder', path):
+                out.append(path)
 
-        elif t[0] == 'goto':
-            out.extend(emit['goto'](t[1:]))
+            case ('goto', file, line, col):
+                out.extend(emit['goto']((file, line, col)))
 
-        else:                               # ('opt', …)
-            _opt, flag, field, values = t
+            case ('opt', flag, field, values):
+                # 这几个开关是 VS Code 系独有的"打开方式"，别的 CLI 拿到各有别解
+                # （逐项见 EMIT 里那几行注释）：不认就摘掉。各选项各自一项，不共用。
+                if field == 'wait' and not emit['wait']:
+                    continue
+                if field == 'forceReuseWindow' and not emit['reuse_window']:
+                    continue
+                if field == 'forceNewWindow' and not emit['new_window']:
+                    continue
+                if field == 'addMode' and not emit['add']:
+                    continue
+                if field == 'diffMode' and not emit['diff']:
+                    continue
+                if field == 'mergeMode' and not emit['merge']:
+                    out.extend(values)      # 合并没有等价物：丢开关，四个路径照开
+                    continue
 
-            # 这几个开关是 VS Code 系独有的"打开方式"，别的 CLI 拿到各有别解
-            # （逐项见 EMIT 里那几行注释）：不认就摘掉。各选项各自一项，不共用。
-            if field == 'wait' and not emit['wait']:
-                continue
-            if field == 'forceReuseWindow' and not emit['reuse_window']:
-                continue
-            if field == 'forceNewWindow' and not emit['new_window']:
-                continue
-            if field == 'addMode' and not emit['add']:
-                continue
-            if field == 'diffMode' and not emit['diff']:
-                continue
-            if field == 'mergeMode' and not emit['merge']:
-                out.extend(values)          # 合并没有等价物：丢开关，四个路径照开
-                continue
-
-            out.append(flag)
-            out.extend(values)
+                out.append(flag)
+                out.extend(values)
 
     if emit['abspath']:
         out = [os.path.abspath(a) if os.path.exists(a) else a for a in out]
