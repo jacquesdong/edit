@@ -245,8 +245,10 @@ emacsclient -t -e '(progn (ediff-files "A" "B") nil)'     # 必须先有 frame�
 - `-g` / `--goto` **不消费参数**：后面那个参数自己按位置参数处理，所以 `-g -r f:3`
   里 `-r` 仍然是选项。真 CLI 也是这么理解的（实测 `buddycn -g -r` 发的是
   `gotoLineMode:true` + `forceReuseWindow:true` + 空 fileURIs）；
-- `--goto=X` 的 X 是内联值（语法上不可能与选项混淆），一律当字面路径走位置参数那套
-  判断：`--goto=-r` 就是文件 `-r`（类似 `--` 之后的字面量），空值 `--goto=` 忽略；
+- 内联写法 `--goto=X` / `-g=X` **不特判**，跟别的"不认识的选项"一样整成
+  `('other', 原文)` 交给 CLI —— 上游自己都不认这种写法（实测 `buddycn --goto=f:3`
+  把取值当布尔丢了、`-g=f:3` 把取值塞进 `gotoLineMode` 字段，两者 fileURIs 都是空的），
+  我们没必要比上游多支持一种语法；
 - 于是"是否跳转"的唯一裁判是 `parse_goto`（位置参数那两步：真实文件优先 +
   `非目录:数字[:数字]`），`split_goto` 退化成它内部的一步。
 

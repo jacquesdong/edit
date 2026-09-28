@@ -277,16 +277,15 @@ class SocketOpenTest(EditCase):
 
 
 class GotoTest(EditCase):
-    """-g / --goto / --goto=X 被忽略：行号只认位置参数写法（报文见 open-goto-short）"""
+    """-g / --goto 被忽略：行号只认位置参数写法（报文见 open-goto-short）"""
 
     def test_forms(self):
-        """三种写法都按位置参数处理：等价，且 :3 不被转义成 %3A"""
+        """空格写法按位置参数处理：等价，且 :3 不被转义成 %3A"""
 
         want = ['file://' + self.a + ':3']
 
         for args in (['-g', self.a + ':3'],
-                     ['--goto', self.a + ':3'],
-                     ['--goto=' + self.a + ':3']):
+                     ['--goto', self.a + ':3']):
             with self.subTest(args):
                 msg = edit.open_request(args)
 
@@ -314,11 +313,14 @@ class GotoTest(EditCase):
             with self.subTest(args):
                 self.assertIsNone(edit.open_request(args))
 
-    def test_inline_value_is_a_plain_argument(self):
-        """--goto=X 的 X 是内联值：当字面路径（--goto=-r 就是文件 -r）"""
+    def test_inline_form_is_not_special_cased(self):
+        """--goto=X / -g=X 不特判：跟别的"不认识的选项"一样交给 CLI"""
 
-        self.assertEqual(edit.normalize(['--goto=-r']), [('file', '-r')])
-        self.assertEqual(edit.normalize(['--goto=']), [])
+        for args in (['--goto=-r'], ['--goto='], ['-g=' + self.a]):
+            with self.subTest(args):
+                self.assertEqual(edit.normalize(args), [('other', args[0])])
+
+        self.assertIsNone(edit.open_request(['--goto=' + self.a + ':3']))
 
     def test_mixes_with_flags(self):
         msg = edit.open_request(['-r', '-g', self.a + ':3'])
@@ -427,7 +429,7 @@ class CliArgvTest(EditCase):
 
         self.assertEqual(edit.cli_argv(['-g', 'a.txt:12:3'], edit.CLI_KIND_NANO),
                          ['+12,3', 'a.txt'])
-        self.assertEqual(edit.cli_argv(['--goto=a.txt:12:3'], edit.CLI_KIND_EMACS),
+        self.assertEqual(edit.cli_argv(['--goto', 'a.txt:12:3'], edit.CLI_KIND_EMACS),
                          ['+12:3', 'a.txt'])
 
     def test_plus_kinds(self):
@@ -444,22 +446,27 @@ class CliArgvTest(EditCase):
                 self.assertEqual(edit.cli_argv(['--wait', 'a.txt'], kind), ['a.txt'])
 
     def test_goto_flag_is_ignored(self):
-        """-g / --goto / --goto=X 被忽略：code 系照样插入自己的 --goto"""
+        """-g / --goto 被忽略：code 系照样插入自己的 --goto"""
 
-        for args in (['-g', 'a.txt:12'], ['--goto', 'a.txt:12'], ['--goto=a.txt:12']):
+        for args in (['-g', 'a.txt:12'], ['--goto', 'a.txt:12']):
             with self.subTest(args):
                 self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE),
                                  ['--goto', 'a.txt:12'])
 
+        # 内联写法不特判：原样交给 CLI
+        self.assertEqual(edit.cli_argv(['--goto=a.txt:12'], edit.CLI_KIND_CODE),
+                         ['--goto=a.txt:12'])
+
     def test_goto_flag_translated_for_vim(self):
         """vim 系不认 -g：按 +行号 翻一遍（vim -g 是启动 GUI，会 E25 报错退出 2）"""
 
-        for flag in ('-g', '--goto', '--goto=a.txt:12'):
-            with self.subTest(flag):
-                args = [flag] if '=' in flag else [flag, 'a.txt:12']
-
+        for args in (['-g', 'a.txt:12'], ['--goto', 'a.txt:12']):
+            with self.subTest(args):
                 self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_VIM),
                                  ['+12', 'a.txt'])
+
+        self.assertEqual(edit.cli_argv(['--goto=a.txt:12'], edit.CLI_KIND_VIM),
+                         ['--goto=a.txt:12'])
 
     def test_goto_flag_without_line(self):
         """-g 的取值没有行号：只剩文件（不能把文件一起丢了）"""
@@ -467,7 +474,7 @@ class CliArgvTest(EditCase):
         for kind in (edit.CLI_KIND_VIM, edit.CLI_KIND_NANO, edit.CLI_KIND_EMACS, None):
             with self.subTest(kind):
                 self.assertEqual(edit.cli_argv(['-g', 'a.txt'], kind), ['a.txt'])
-                self.assertEqual(edit.cli_argv(['--goto=a.txt'], kind), ['a.txt'])
+                self.assertEqual(edit.cli_argv(['--goto', 'a.txt'], kind), ['a.txt'])
 
     def test_many_targets_each_get_their_own_goto(self):
         """多个目标各插一份 --goto：实测 CLI 的 -g 可重复，报文是累加的"""

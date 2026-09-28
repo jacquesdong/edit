@@ -28,11 +28,12 @@
   CLI 自己会复用当前窗口；server 端（<安装目录>/bin/remote-cli/*）必须有
   VSCODE_IPC_HOOK_CLI，否则 CLI 直接拒绝执行，那种场景才需要 --init。
 
-  行号只认位置参数的 文件:行号 写法：-g / --goto / --goto=X 被直接忽略（edit 对带
-  行号的参数本来就跳转，所以 -g f:3 与 f:3 完全等价）。-g / --goto 不消费后面的
-  参数（-g -r f:3 里 -r 仍是选项），--goto=X 的 X 当字面路径（--goto=-r 就是文件
-  -r；空值忽略）。此外以 - 开头的是选项，-- 之后按字面量原样交给 CLI；其中
-  -m / --merge 带 4 个取值（path1 path2 base result），取值不够就交回 CLI 报错。
+  行号只认位置参数的 文件:行号 写法：-g / --goto 被直接忽略（edit 对带行号的参数本来
+  就跳转，所以 -g f:3 与 f:3 完全等价），它们也不消费后面的参数（-g -r f:3 里 -r 仍
+  是选项）。内联写法 --goto=X / -g=X 不特判 —— 上游自己也不认（实测取值会被丢掉或
+  塞错字段），所以跟别的"不认识的选项"一样原样交给 CLI。此外以 - 开头的是选项，
+  -- 之后按字面量原样交给 CLI；其中 -m / --merge 带 4 个取值（path1 path2 base
+  result），取值不够就交回 CLI 报错。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，只传文件。
@@ -742,8 +743,9 @@ def socket_status(sock, timeout=1.5):
 # field: 报文字段
 # arity: 取值个数（0 = 开关，不带值）
 #
-# -g / --goto / --goto=X 不在这里：它们只是"下一个参数是跳转目标"的提示，而 edit 对
-# 任何 文件:行号 参数本来就跳转，所以直接忽略（见 normalize）。
+# -g / --goto 不在这里：它们只是"下一个参数是跳转目标"的提示，而 edit 对任何
+# 文件:行号 参数本来就跳转，所以直接忽略（见 normalize）。内联写法 --goto=X / -g=X
+# 也不特判：上游自己都不认那种写法，所以跟别的"不认识的选项"一样原样交给 CLI。
 OPTIONS = {
     '-r': ('forceReuseWindow', 0), '--reuse-window': ('forceReuseWindow', 0),
     '-n': ('forceNewWindow', 0), '--new-window': ('forceNewWindow', 0),
@@ -800,13 +802,13 @@ def normalize(args):
     - ('other', orig)                认不出来的：不认识的选项、取值不够的选项、
                                      -- 之后的字面量
 
-    -g / --goto / --goto=X 只是"下一个参数是跳转目标"的提示，而 edit 对任何带行号的
-    参数本来就置 gotoLineMode，所以它们被忽略：
+    -g / --goto 只是"下一个参数是跳转目标"的提示，而 edit 对任何带行号的参数本来就置
+    gotoLineMode，所以它们被忽略、也不消费参数 —— 后面那个参数自己按位置参数处理
+    （所以 `-g -r f:3` 里 -r 仍然是选项，不是"-g 的取值"）。
 
-    * -g / --goto 不消费参数 —— 后面那个参数自己按位置参数处理（所以 `-g -r f:3`
-      里 -r 仍然是选项，不是"-g 的取值"）；
-    * --goto=X 的 X 是内联值（不可能与选项混淆），一律当字面路径走位置参数那套
-      判断：`--goto=-r` 就是文件 -r，空值（`--goto=`）忽略。
+    内联写法（--goto=X / -g=X）不特判：上游自己也不认这种写法（实测 `buddycn
+    --goto=f:3` 把取值当布尔丢了、`-g=f:3` 把取值塞进 gotoLineMode 字段，两者都没有
+    文件），所以它们跟别的"不认识的选项"一样整成 ('other', 原文) 交给 CLI。
 
     认不出来的一律整成 ('other', 原文) 而不是丢掉：socket 后端见它就交回 CLI，
     CLI 后端原样吐回去 —— 顺序和原文一字不改，因为回退时交给 CLI 的就是它。
@@ -821,16 +823,12 @@ def normalize(args):
     [('folder', '/tmp')]
     >>> normalize(['-g', 'a.txt:3:4'])       # -g 被忽略，取值按位置参数走
     [('goto', 'a.txt', '3', '4')]
-    >>> normalize(['--goto=a.txt:3'])        # 内联写法同理
-    [('goto', 'a.txt', '3', None)]
     >>> normalize(['-g'])                    # 没取值：选项被忽略
     []
     >>> normalize(['-g', '-r', 'a.txt:3'])   # -g 不消费参数，-r 仍是选项
     [('opt', '-r', 'forceReuseWindow', []), ('goto', 'a.txt', '3', None)]
-    >>> normalize(['--goto=-r'])             # 内联值当字面路径
-    [('file', '-r')]
-    >>> normalize(['--goto='])               # 空值：忽略
-    []
+    >>> normalize(['--goto=-r'])             # 内联写法当不认识的选项
+    [('other', '--goto=-r')]
     >>> normalize(['-m', 'a', '-r', 'b'])    # 取值不够 / 取值又是个选项
     [('other', '-m'), ('file', 'a'), ('opt', '-r', 'forceReuseWindow', []), ('file', 'b')]
     >>> normalize(['--', 'a.txt:3'])         # -- 之后按字面量
@@ -856,14 +854,6 @@ def normalize(args):
 
         if a in ('-g', '--goto'):
             continue                    # 提示而已：不产出 token，也不消费参数
-
-        if a.startswith('--goto='):
-            value = a[len('--goto='):]
-
-            if value:                   # 空值忽略
-                out.append(arg_token(value))
-
-            continue
 
         if a.startswith('-'):
             spec = OPTIONS.get(a)
@@ -962,8 +952,9 @@ def open_request(args, marker=None):
     （-a / -d / --wait 空着的情况走不到这里：main 见到 NEEDS_TARGET 里那几项没有
     目标就直接提示退出了。）
 
-    -g / --goto / --goto=X 被忽略（见 normalize）：行号只认位置参数写法，所以
-    `-g f:3` 与 `f:3` 发出的是同一份报文。
+    -g / --goto 被忽略（见 normalize）：行号只认位置参数写法，所以 `-g f:3` 与 `f:3`
+    发出的是同一份报文。内联写法 --goto=X / -g=X 不算"忽略"、也不特判：它们跟别的
+    不认识的选项一样整成 ('other', 原文)，于是这里返回 None（交回 CLI）。
 
     -m / --merge 认 4 个取值（path1 path2 base result）：原样进 fileURIs 并置
     mergeMode。少一个、或某个取值又是个选项，都交回 CLI。
@@ -994,8 +985,8 @@ def open_request(args, marker=None):
     ['file:///no-such-dir/x.py:3']
     >>> open_request(['--goto', '/no-such-dir/x.py:3'])['gotoLineMode']
     True
-    >>> open_request(['--goto=/no-such-dir/x.py:3:5'])['fileURIs']
-    ['file:///no-such-dir/x.py:3:5']
+    >>> open_request(['--goto=/no-such-dir/x.py:3:5']) is None   # 内联写法不特判
+    True
     >>> open_request(['-r', '-g', '/no-such-dir/x.py:3'])['forceReuseWindow']
     True
     >>> open_request(['-g', '/no-such-dir/x.py'])['gotoLineMode']   # 没行号：普通文件
@@ -1224,8 +1215,8 @@ def to_argv(tokens, kind):
     ['--goto', 'a.txt:12']
     >>> to_argv(normalize(['-g', 'a.txt:12']), CLI_KIND_VIM)   # vim 不认 -g：翻成 +行号
     ['+12', 'a.txt']
-    >>> to_argv(normalize(['--goto=a.txt:12']), CLI_KIND_VIM)  # --goto= 同样翻
-    ['+12', 'a.txt']
+    >>> to_argv(normalize(['--goto=a.txt:12']), CLI_KIND_VIM)  # 内联写法：原样给 CLI
+    ['--goto=a.txt:12']
     >>> to_argv(normalize(['-g', 'a.txt']), CLI_KIND_VIM)      # 取值没行号：只剩文件
     ['a.txt']
     >>> to_argv(normalize(['a.txt:3', '-g', 'b.txt:9']), CLI_KIND_VIM)  # 两个都翻
