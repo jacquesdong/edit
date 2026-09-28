@@ -1570,6 +1570,18 @@ def main():
         print_usage()
         return
 
+    # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv（纯函数，先扫出来）
+    tokens = normalize(args)
+
+    # -a / -d / --wait 要"有东西可开"才有意义（要目录 / 要两个文件 / 至少要一个文件）：
+    # 空着交给 CLI 只会发个空报文，或让 vim 系开个空编辑器。裸调用与 -r / -n 不拦 ——
+    # 那些对 code 系是有定义的（开窗口 / 复用窗口 / 新窗口）。放在挑窗口之前，免得
+    # --interactive 让用户白挑一次
+    if nothing_to_open(tokens) and any(
+            t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
+        sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
+            t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
+
     # --interactive：先挑窗口。挑完把 socket 写回环境，后面所有 current_socket()
     # 就都指向它 —— 直连、--init 的默认值、以及回退时 CLI 继承的环境，全都跟着走，
     # 那四个调用点一行都不用改
@@ -1637,17 +1649,6 @@ def main():
               (result.attempted, result.failed))
 
         return 1 if result.failed else 0
-
-    # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv
-    tokens = normalize(args)
-
-    # -a / -d / --wait 要"有东西可开"才有意义（要目录 / 要两个文件 / 至少要一个文件）：
-    # 空着交给 CLI 只会发个空报文，或让 vim 系开个空编辑器。裸调用与 -r / -n 不拦 ——
-    # 那些对 code 系是有定义的（开窗口 / 复用窗口 / 新窗口）
-    if nothing_to_open(tokens) and any(
-            t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
-        sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
-            t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
     # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径

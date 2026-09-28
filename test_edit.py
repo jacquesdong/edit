@@ -786,6 +786,15 @@ class NoTargetTest(EditCase):
         self.assertEqual(proc.returncode, 7, proc.stderr)
         self.assertNotIn('没有文件或目录', proc.stderr)
 
+    def test_error_comes_before_picking_a_window(self):
+        """判定在挑窗口之前：--interactive 不该让用户白挑一次"""
+
+        proc = self.run_edit('--interactive', '-d')
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('-d 后面没有文件或目录', proc.stderr)
+        self.assertNotIn('Traceback', proc.stderr)
+
 
 def load_fixtures():
     """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）"""
