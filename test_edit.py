@@ -1300,6 +1300,23 @@ class ListTest(ProcCase):
 
         self.assertIn('不接受文件参数', code)
 
+    def test_shows_creation_time(self):
+        """time 列 = socket 文件的创建（bind）时间；文件不在了才显示 ?"""
+
+        for path, when in ((self.sock1, 1_600_000_000),      # 2020-09
+                           (self.sock2, 1_700_000_000)):      # 2023-11
+            s = socket.socket(socket.AF_UNIX)
+            s.bind(path)
+            s.close()
+            os.utime(path, (when, when))
+
+        out, _, _ = self.run_main('--list')
+
+        rows = out.strip().split('\n')
+
+        self.assertTrue(rows[1].startswith('   1  2020-'), rows[1])
+        self.assertTrue(rows[2].startswith('   2  2023-'), rows[2])
+
 
 class InteractiveOpenTest(ProcCase):
     """--interactive <文件>：挑中的窗口直接开文件（不必先 --init 导入 hook）"""

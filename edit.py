@@ -1429,11 +1429,40 @@ def probe_workspaces(socks, timeout=1.5):
         for s, fut in zip(socks, futures):
             s['authority'], s['workspace'] = fut.result()
 
+def fmt_time(ts: float) -> str:
+    """时间戳 -> 本地时间 'YYYY-MM-DD HH:MM:SS'
+
+    两处共用这一串格式：--list 的表与 --prune 的清单（免得两处漂）。
+
+    >>> len(fmt_time(1782300000.0))         # 具体值看时区，只看形状
+    19
+    """
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
+
+
+def sock_created(path: str) -> str:
+    """socket 文件的创建（bind）时间；stat 不到就 '?'
+
+    用 mtime 的理由见 prune_sockets：Linux 拿不到 st_birthtime，而 socket 文件 bind
+    之后没人再写它。--list 里路径可能刚被删（窗口退了），那就显示 ?。
+
+    >>> sock_created('/no-such-file.sock')
+    '?'
+    """
+    try:
+        return fmt_time(os.stat(path).st_mtime)
+    except OSError:
+        return '?'
+
+
 def format_sockets(socks, hook):
     """把候选渲染成表格行：--list 打印它，--init --interactive 也用它
 
     打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI。
     和 hook 相同的那个用 * 标出来；workspace 是问窗口要来的，问不到就是 ?。
+
+    time 列是 socket 文件的创建（bind）时间（见 sock_created）—— 同一个窗口会同时挂着
+    好几个 socket，靠它区分谁新谁旧；文件不在了就是 ?。
 
     >>> s = [{'sock': '/r/vscode-ipc-a.sock', 'pid': '1',
     ...       'cli': '/i/bin/remote-cli/buddycn', 'workspace': '/w/proj'}]
@@ -1441,6 +1470,8 @@ def format_sockets(socks, hook):
     '*'
     >>> format_sockets(s, None)[1].split()[0]
     '1'
+    >>> format_sockets(s, None)[1].split()[1]       # 路径不存在 -> 时间列是 ?
+    '?'
     >>> format_sockets(s, None)[1].split()[-2:]
     ['buddycn', '/w/proj']
     >>> b = [{'sock': '/r/a b.sock', 'pid': '1', 'cli': ''}]
@@ -1450,15 +1481,17 @@ def format_sockets(socks, hook):
     ['?', '?']
     """
 
-    lines = ['  #   %-67s %-8s %-9s %s' % ('socket', 'pid', 'cli', 'workspace')]
+    lines = ['  #   %-19s %-67s %-8s %-9s %s'
+             % ('time', 'socket', 'pid', 'cli', 'workspace')]
 
     for n, s in enumerate(socks, 1):
         mark = '*' if s['sock'] == hook else ' '
 
         # shlex.quote：路径含空格时整行还能直接粘回 shell；正常路径不加引号
-        lines.append('%s %2d  %-67s %-8s %-9s %s' %
-                     (mark, n, shlex.quote(s['sock']), s['pid'],
-                      os.path.basename(s['cli']) or '?', s.get('workspace') or '?'))
+        lines.append('%s %2d  %-19s %-67s %-8s %-9s %s' %
+                     (mark, n, sock_created(s['sock']), shlex.quote(s['sock']),
+                      s['pid'], os.path.basename(s['cli']) or '?',
+                      s.get('workspace') or '?'))
 
     return lines
 
@@ -1590,8 +1623,7 @@ def format_prune(result: PruneResult, dry_run: bool) -> list[str]:
     >>> format_prune(r, False)[1:]
     ['已删除 1 个；跳过 3 个活着的、1 个不是 socket 文件']
     """
-    lines = ['%s  %s' % (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(m)), p)
-             for m, p in result.removed]
+    lines = ['%s  %s' % (fmt_time(m), p) for m, p in result.removed]
 
     if dry_run:
         lines.append('共 %d 个会删；跳过 %d 个活着的、%d 个不是 socket 文件'

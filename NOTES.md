@@ -379,6 +379,9 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
   从 `Process Argv: --remote <authority> <workspace>` 取 workspace（行号：走
   `parse_status()`；本地窗口没有 `--remote`，那就认不出来）。8 个窗口约 0.3s
   （线程池 ≤8，单个 1.5s 超时），失败显示 `?`。
+- 表里第一列是 socket 的**创建时间**（`sock_created()`，取文件 mtime，理由同 `--prune`；
+  文件不在了显示 `?`）：同一个窗口会同时挂着好几个 socket（实测十分钟内三个），
+  时间是目前唯一能区分它们的字段。
 
 ### `--prune`：清掉死掉的 socket
 
