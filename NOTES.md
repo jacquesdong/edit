@@ -62,10 +62,14 @@ URI 编码与 `remote-cli` 逐字节一致：空格 `%20`、非 ASCII 按 UTF-8 
 `remoteAuthority` / `waitMarkerFilePath` 只有在对应场景才发，普通 open 没有。
 `--wait` 时多一个 `waitMarkerFilePath`（CLI 现造的临时文件，每次路径都不同）。
 
-**唯一与 CLI 故意不同的字段**：`gotoLineMode`。CLI 只有 `--goto` / `-g` 才发 `true`，
-位置参数 `code file:3` 发的是 **`false`**（`:3` 照样拼在 URI 里，也就是不跳行）；
-而 `edit file:3` 要的是"跳到第 3 行"，所以按 `--goto` 的语义发 `true`。
-这条差异记在 fixtures 对应条目的 `diff` 里，不是 bug。
+**唯一与 CLI 故意不同的字段**：`gotoLineMode`，两个方向各一格：
+
+- 我们**多发**：位置参数 `code file:3` 发的是 `false`（`:3` 照样拼在 URI 里，也就是
+  不跳行），而 `edit file:3` 要的是"跳到第 3 行"，所以按 `--goto` 的语义发 `true`；
+- 我们**少发**：`edit -g f`（目标没有行号）发 `false`，CLI 发 `true` —— 我们忽略 `-g`
+  之后就不知道"用户想跳转"，但 URI 里没有行号可解析，行为等价。
+
+这两格都记在 fixtures 对应条目的 `diff` 里，不是 bug。
 
 ### 怎么再摸一次协议
 
