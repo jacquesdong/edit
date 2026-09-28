@@ -111,6 +111,17 @@ uv run python3 tools/capture_cli.py --name open-goto -- /tmp/a.txt:3
 不想用 uv 也行：直接用系统 `ruff` / `python3` 跑同样的命令，只是版本可能不是 lock
 里那份（`ruff check` 的配置仍读 `pyproject.toml`）。
 
+另外有个**第二意见**（不进 `uv.lock`、也不当门禁 —— 还是预览版）：
+
+```bash
+uvx ty check                     # Astral 的 ty（0.0.84），0.14 s
+```
+
+它的规则集和 mypy 不同，能报类型之外的东西 —— 实测现在 2 条，都是 `tempfile.mktemp`
+的弃用告警（`test_edit.py:45`、`tools/capture_cli.py:89`），mypy 不管这类。这 2 条
+**先留着**：那两处 `mktemp` 是为了拿一个 socket 路径名（不是真建文件），换 `mkstemp`
+得先 unlink，不是机械替换。门禁以 `uv run mypy` 为准。
+
 只跑 `ruff check`，**没有采用 `ruff format`**：仓库故意用了魔尾逗号（`[cli,]`）
 和等号对齐（`CLI_KIND_VIM  = 'vim'`）这类写法，格式化会把它们拆开/压平
 （ruff 0.16.9 实测全量重排 507 行：`edit.py` 253 / `test_edit.py` 215 / `tools` 39，
