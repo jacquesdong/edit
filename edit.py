@@ -431,6 +431,10 @@ def goto_target(goto):
     存在的文件转成绝对路径：remote-cli 是把请求转给 server 的代理，
     相对路径未必按当前 shell 的 cwd 解释。
 
+    这一步不能指望 `to_argv` 末尾那次统一的 abspath：那步是逐个 out 元素判
+    `os.path.exists`，而这里已经把路径拼进了 `f:3` 这样一个字符串 —— `exists` 必然
+    为假，够不着（它只对 `file` / `folder` 那种裸路径有效）。所以要在这儿自己转。
+
     （例子用 realpath 而非 __file__：经 ~/.local/bin/edit 软链调用时
     __file__ 就是软链路径，abspath 不会解开它）
 
@@ -1116,39 +1120,56 @@ def to_msg(tokens, marker=None):
     return msg
 
 
-def plus_goto(file, line, column):
-    """vim 系的行号写法：+行号 放文件前
+def goto_inline(flag):
+    """inline 形状：跳转目标与路径是同一个串（`--goto f:3:5`）
 
-    vim 的 `+N` 不带列（它靠 `+{命令}` / `-c`），列号参数直接忽略。
-
-    >>> plus_goto('a.txt', '12', '3')
-    ['+12', 'a.txt']
+    >>> goto_inline('--goto')(('a.txt', '12', '3'))
+    ['--goto', 'a.txt:12:3']
     """
 
-    return ['+' + line, file]
+    return lambda goto: [flag, goto_target(goto)]
 
 
-def plus_col(sep):
-    """生成 nano / emacs 系的行号写法：+行号[sep列号]
+def goto_plus(sep):
+    """plus 形状：`+行号[sep列号]` 放在文件名前（vim / nano / emacs）
 
-    列号两家都是 1 起（emacs 29.4 实测 `+3:5` 的光标落在 0 起第 4 列；nano 的 man
-    写"默认是 line 1, column 1"），和我们自己的 `文件:行号:列` 一致，不用 ±1。
-    没给列号就只有 `+行号`。
+    `sep` 是列号的分隔符 —— vim 不支持列（`sep=None`，只用 `+行号`），nano 是 `,`，
+    emacs 系是 `:`。列号两家都是 1 起（emacs 29.4 实测 `+3:5` 的光标落在 0 起第 4
+    列；nano 的 man 写"默认是 line 1, column 1"），和我们自己的 `文件:行号:列` 一致，
+    拼接不用 ±1；没给列号就只有 `+行号`。
 
-    >>> plus_col(',')('a.txt', '12', '3')            # nano
+    >>> goto_plus(None)(('a.txt', '12', '3'))        # vim：列号用不上，丢掉
+    ['+12', 'a.txt']
+    >>> goto_plus(',')(('a.txt', '12', '3'))         # nano
     ['+12,3', 'a.txt']
-    >>> plus_col(':')('a.txt', '12', '3')            # emacs 系
+    >>> goto_plus(':')(('a.txt', '12', '3'))         # emacs 系
     ['+12:3', 'a.txt']
-    >>> plus_col(':')('a.txt', '12', None)           # 没给列
+    >>> goto_plus(':')(('a.txt', '12', None))        # 没给列
     ['+12', 'a.txt']
     """
 
-    return lambda file, line, column: ['+' + line + (sep + column if column else ''), file]
+    return lambda goto: ['+' + goto[1] + (sep + goto[2] if sep and goto[2] else ''),
+                         goto[0]]
+
+
+def goto_file(goto):
+    """认不出是哪一类：只传文件，行号丢掉
+
+    不知道对面认不认 `文件:行号`，把 `f:3` 当文件名递过去可能什么都打不开，所以只
+    留文件。注意它**不是** inline 形状（`goto_inline` 会把行号一起带上）。
+
+    >>> goto_file(('a.txt', '12', '3'))
+    ['a.txt']
+    """
+
+    return [goto[0]]
 
 
 # 每个 kind 怎么把 token 翻译成命令行 —— "针对不同程序翻译"就这一张表：
-#   goto   : (文件, 行号, 列号) -> 片段列表（一个目标一次，多目标就多份 ——
-#            实测 CLI 的 -g 可以重复，报文是累加的）
+#   goto   : 吃一个跳转目标 (文件, 行号, 列号) -> 片段列表（一个目标一次，多目标就
+#            多份 —— 实测 CLI 的 -g 可以重复，报文是累加的）。三种形状各是一个函数：
+#            goto_inline（目标与路径同一个串）/ goto_plus（+N 放文件名前）/
+#            goto_file（认不出：只留文件）
 #   wait / reuse_window / new_window / add / diff / merge
 #          : 这类 CLI 认不认这个 VS Code 系开关。认就原样递过去，不认就摘掉
 #            （merge 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
@@ -1156,7 +1177,7 @@ def plus_col(sep):
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
 EMIT = {
     CLI_KIND_CODE: {
-        'goto': lambda file, line, column: ['--goto', goto_target((file, line, column))],
+        'goto': goto_inline('--goto'),
         'wait': True,
         'reuse_window': True,
         'new_window': True,
@@ -1166,7 +1187,7 @@ EMIT = {
         'abspath': True,
     },
     CLI_KIND_VIM: {
-        'goto': plus_goto,              # vim -g 是启动 GUI（E25 退出 2），绝不能透传
+        'goto': goto_plus(None),        # vim -g 是启动 GUI（E25 退出 2），绝不能透传
         'wait': False,                  # -w 是把键入的命令写进 scriptout
         'reuse_window': False,          # -r 是列/恢复交换文件
         'new_window': False,            # -n 是不用交换文件
@@ -1176,7 +1197,7 @@ EMIT = {
         'abspath': False,
     },
     CLI_KIND_NANO: {
-        'goto': plus_col(','),          # nano -g 是 --showcursor
+        'goto': goto_plus(','),         # nano -g 是 --showcursor
         'wait': False,                  # 没有 --wait
         'reuse_window': False,          # -r <数字>：把文件名当填充宽度
         'new_window': False,            # -n 是 --noread：只写不读
@@ -1186,7 +1207,7 @@ EMIT = {
         'abspath': False,
     },
     CLI_KIND_EMACS: {
-        'goto': plus_col(':'),          # emacs -g 是 --geometry，会吃掉文件名
+        'goto': goto_plus(':'),         # emacs -g 是 --geometry，会吃掉文件名
         'wait': False,                  # emacsclient 的 -w 是 --timeout=SECONDS
         'reuse_window': False,          # emacs -r 是 -rv 反色；emacsclient -r 是 --reuse-frame
         'new_window': False,            # emacs 报未知选项；emacsclient -n 是 --no-wait
@@ -1240,7 +1261,7 @@ def to_argv(tokens, kind):
     """
 
     unknown = {
-        'goto': lambda file, line, column: [file], # 认不出是哪一类：只传文件，行号丢掉
+        'goto': goto_file,              # 认不出是哪一类：只传文件，行号丢掉
         'wait': False,
         'reuse_window': False,
         'new_window': False,
@@ -1261,7 +1282,7 @@ def to_argv(tokens, kind):
             out.append(t[1])
 
         elif t[0] == 'goto':
-            out.extend(emit['goto'](*t[1:]))
+            out.extend(emit['goto'](t[1:]))
 
         else:                               # ('opt', …)
             _opt, flag, field, values = t

@@ -304,7 +304,7 @@ edit -g /tmp/a.txt:3 /tmp/b.txt:9
 | vim | 不带 | `+N`（vim 靠 `+{命令}` / `-c`） |
 
 所以 nano / emacs 各是一个 kind（`CLI_KIND_NANO` / `CLI_KIND_EMACS`），
-`EMIT` 里各挂一个 `plus_col(sep)`。基准两边都是 **1 起**（emacs 29.4 实测
+`EMIT` 里各挂一个 `goto_plus(sep)`（vim 那行是 `goto_plus(None)`）。基准两边都是 **1 起**（emacs 29.4 实测
 `+3:5` 的光标落在 0 起第 4 列；nano 的 man 写"默认是 line 1, column 1"），
 和我们自己的 `文件:行号:列` 一致，拼接时不用 ±1。
 
@@ -415,29 +415,16 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
    - 手边**没有桌面版环境可实测**，只能靠 fixtures + 假 `/proc` 推 —— 落地前先想清楚
      怎么验证。
 
-4. `goto` 渲染的优化（**暂时不做**；第一条是纯重构，第二条**会改行为**，别当成顺手做）：
-
-   - `emit['goto']` 现在吃三个参数，而它的数据源本来就是三元组（token
-     `('goto', f, line, c)`），于是**唯一**那处调用要 `*` 解包（`to_argv` 里
-     `out.extend(emit['goto'](*t[1:]))`）。统一成"吃一个跳转目标元组"后 `*` 消失，
-     也和 `goto_target(goto)` 同风格；
-   - 表里其实是**三种**形状，不是两种：
-     - **inline**（目标与路径同一个串）：code 的 `--goto f:3:5`；
-     - **plus**（`+N[:C]` 放在文件名前）：vim / nano / emacs；
-     - **只留文件**：认不出的那一类（`[file]`，**行号丢掉**）——不是 inline。
-     前两种可收成 `goto_inline(flag)` / `goto_plus(sep)` 两个工厂（5 个 lambda/函数
-     变 2 个，表里那 5 行的差异就看得见了；`plus_goto` 同时成了 `plus_col(None)` 的
-     特例，条件是放宽成 `if sep and column`）。但**认不出的那类不能用
-     `goto_inline(None)` 表达** —— 它会连行号一起拼回去，那是行为变化；要收它得单独
-     给一维（如"带不带行号"）或干脆留着一项；
-   - 顺带补一句 docstring：`goto_target` 自己 `abspath` 是必需的 —— 末尾那次
-     `emit['abspath']` 逐个元素判 `os.path.exists`，而跳转目标已被拼成一个字符串
-     （`/abs/f:3`），`exists` 必然为假：够不着。那条统一步骤只对 `file` / `folder`
-     那种裸路径有效。
-
-   （记的时候是"两处调用 + 两种形状"，后来 `-g` 改成直接忽略（翻译分支连它那次
-   `emit['goto'](*goto)` 一起没了，`split_goto` 现在只被 `parse_goto` 调）、认不出的
-   goto 改成只传文件，所以要按上面这版看。）
+4. ~~`goto` 渲染的优化~~ 已做：`emit['goto']` 现在吃**一个跳转目标元组**（数据源
+   本来就是 `('goto', f, line, c)`，唯一那处调用不用再 `*` 解包了，也和
+   `goto_target(goto)` 同风格）；三种形状各是一个函数 —— `goto_inline(flag)`（code）、
+   `goto_plus(sep)`（vim 用 `None`、nano `,`、emacs 系 `:`）、`goto_file`（认不出：
+   只留文件）。`plus_goto` / `plus_col` 不再存在：vim 那行就是 `goto_plus(None)`，
+   条件写成 `if sep and column` 一句覆盖三家。认不出的那类**没有**并进 inline ——
+   `goto_inline` 会把行号一起带上，那是行为变化（`goto_file` 的 docstring 里点明了）。
+   顺带在 `goto_target` 的 docstring 里写明它为何自己 abspath。行为不变：五个 kind 的
+   `--dry-run` 输出与改前逐字一致（`--goto f:3:5` / `+3 f` / `+3,5 f` / `+3:5 f` /
+   只给 `f`）。
 
 5. `cli_argv(args, kind)` 是**测试缝**：`test_edit.py` 26 处用它换一行的可读，而生产
    路径不能用它（同一份 token 要喂 `to_msg` 和 `to_argv`，粘回去就等于扫两遍）。
