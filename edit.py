@@ -534,7 +534,7 @@ def find_sockets():
     except OSError:
         return None
 
-    found = {}
+    found: dict[str, dict[str, str]] = {}
 
     for pid in os.listdir(PROC):
         if not pid.isdigit():
@@ -1153,6 +1153,9 @@ def to_msg(tokens: list[Token], marker: str | None = None) -> OpenMsg | None:
                 for v in values:
                     msg['fileURIs'].append(file_uri(v))
 
+            case _:
+                raise AssertionError(t)     # Token 是穷尽的：漏一种形状就在这儿炸出来
+
     if marker and not msg['fileURIs']:
         return None                         # CLI 要求 --wait 至少带一个文件
 
@@ -1363,6 +1366,9 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
 
                 out.append(flag)
                 out.extend(values)
+
+            case _:
+                raise AssertionError(t)     # Token 是穷尽的：漏一种形状就在这儿炸出来
 
     if emit['abspath']:
         out = [os.path.abspath(a) if os.path.exists(a) else a for a in out]
