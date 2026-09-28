@@ -354,11 +354,11 @@ class MergeTest(EditCase):
     def test_relative_becomes_absolute(self):
         """相对路径按 cwd 解成绝对路径 —— CLI 也是这么发的（capture 里试过）"""
 
-        msg = edit.open_request(['-m', 'a', 'b', 'base', 'res'])
+        msg = edit.open_request(['-m', 'a', 'b', 'base', 'result'])
 
         self.assertEqual(msg['fileURIs'],
                          ['file://' + os.path.join(os.getcwd(), n)
-                          for n in ('a', 'b', 'base', 'res')])
+                          for n in ('a', 'b', 'base', 'result')])
 
     def test_too_few_paths_falls_back(self):
         """不足 4 个路径：交回 CLI 让它自己报错"""
@@ -497,6 +497,39 @@ class CliArgvTest(EditCase):
     def test_wait_dropped_unless_code(self):
         self.assertEqual(edit.cli_argv(['--wait', self.a], edit.CLI_KIND_VIM), [self.a])
         self.assertEqual(edit.cli_argv(['-w', self.a], None), [self.a])
+
+    def test_code_switches_dropped(self):
+        """-r / -n / -a：非 code 系各有别解（vim -r 恢复交换文件、nano -n 只写不读…），一律摘掉"""
+
+        for kind in (edit.CLI_KIND_VIM, edit.CLI_KIND_NANO, edit.CLI_KIND_EMACS, None):
+            for flag in ('-r', '-n', '-a',
+                         '--reuse-window', '--new-window', '--add'):
+                with self.subTest((kind, flag)):
+                    self.assertEqual(edit.cli_argv([flag, self.a], kind), [self.a])
+
+    def test_diff_kept_for_code_and_vim(self):
+        """-d：code 系和 vim 都是 diff 模式（等价，保留）；nano / emacs / 认不出的摘掉"""
+
+        args = ['-d', self.a, self.b]
+
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_VIM), args)
+
+        for kind in (edit.CLI_KIND_NANO, edit.CLI_KIND_EMACS, None):
+            with self.subTest(kind):
+                self.assertEqual(edit.cli_argv(args, kind), [self.a, self.b])
+
+    def test_merge_keeps_its_paths(self):
+        """-m：合并没有等价物 —— 开关丢掉，四个路径照开（不能把文件一起丢了）"""
+
+        args = ['-m', self.a, self.b, self.a, self.b]
+        paths = [self.a, self.b, self.a, self.b]
+
+        self.assertEqual(edit.cli_argv(args, edit.CLI_KIND_CODE), args)
+
+        for kind in (edit.CLI_KIND_VIM, edit.CLI_KIND_NANO, edit.CLI_KIND_EMACS, None):
+            with self.subTest(kind):
+                self.assertEqual(edit.cli_argv(args, kind), paths)
 
     def test_literal_after_dashdash(self):
         self.assertEqual(edit.cli_argv(['--', '-w', 'a.txt:3'], edit.CLI_KIND_CODE),

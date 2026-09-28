@@ -53,7 +53,7 @@ Content-Length: 189
 | `edit -n a.txt` | `forceNewWindow:true` |
 | `edit -a a.txt` | `addMode:true` |
 | `edit -d a.txt b.txt` | `diffMode:true`，两个 `fileURIs` |
-| `edit -m a.txt b.txt base res` | `mergeMode:true`，四个 `fileURIs`（path1 path2 base result） |
+| `edit -m a.txt b.txt base result` | `mergeMode:true`，四个 `fileURIs`（path1 path2 base result） |
 | `edit somedir/` | 进 `folderURIs`，`fileURIs` 为空 |
 
 URI 编码与 `remote-cli` 逐字节一致：空格 `%20`、非 ASCII 按 UTF-8 percent 编码，
@@ -184,23 +184,50 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
 `-w` 是 `--wait` 的别名（同上源码里 `wait:{type:"boolean",alias:"w"}`）。
 `--wait` 只给目录不认（CLI 要求至少一个文件），这种就交回 CLI 让它报错。
 
-### 交回别的 CLI 时把 --wait 摘掉
+### 交回别的 CLI 时摘掉 VS Code 系的开关
 
-`--wait` / `-w` 是 VS Code 系的选项（直连走 marker；交回 CLI 时它自己也认）。
-别的 CLI 没有：
+`--wait` / `-w` / `-r` / `-n` / `-a` / `-d` / `-m` 都是 VS Code 系的开关（直连时各自
+对应报文里的一个字段）。别的 CLI 拿到这些短选项，含义一个比一个偏 —— 实测（本机
+vim 9.1 / nano 7.2 / emacs 29.4 / emacsclient 29.4）：
 
-- vim：`vim --wait f` -> `Unknown option argument: "--wait"`，退出 1；
-- 更要命的是 `-w`：vim 里是 `-w <scriptout>`（把键入的命令追加写进文件），
-  语义相反还毁文件；
-- emacsclient（29.4 实测）：`--wait` 是 `unrecognized option`，而 `-w` 是
-  `--timeout=SECONDS`（要吃一个数字，跟 vim 的 `-w` 一个性质）；它默认就阻塞
-  等到 server 缓冲区结束，`--wait` 的语义天然满足，摘掉正好；
-- 好消息是终端里的 vim 本来就前台阻塞、退出才返回，等于天然在等，摘掉正好。
-  GUI 版（gvim / mvim）会 fork 后立刻返回，那种得 `-f`（foreground）—— 但本机
-  `vim -f` 退出 1、`vim -h` 里也没有，那是 GUI 版才有的开关，所以**不翻译**。
+| 选项 | vim | nano | emacs | emacsclient |
+|---|---|---|---|---|
+| `-r` | 列/恢复交换文件 | `-r <数字>`：把文件名当填充宽度 | `-rv` 反色显示 | `--reuse-frame` |
+| `-n` | 不用交换文件 | `--noread`：**只写不读** | 未知选项，报错 | `--no-wait` |
+| `-a` | 未知选项，报错 | `--atblanks` | 未知选项，报错 | 要参数，报错 |
+| `-d` | **就是 diff 模式（等价）** | `--rebinddelete` | `-d display` **吃文件名** | `-d display` 吃文件名 |
+| `-m` | 禁止写文件 | `--mouse` | 未知选项，报错 | `unrecognized option` |
+| `-w` | `-w <scriptout>`：把命令写进文件 | — | — | `--timeout=SECONDS`（要数字） |
+| `--wait` | 未知选项，报错 | — | 未知选项，报错 | 未知选项，报错 |
 
-于是 `drop_wait()`：kind 不是 VS Code 系就把这两个参数摘掉（`--` 之后按字面量），
-nano / emacs 以及认不出来的 CLI（kind 为 None）同样摘。
+于是 `EMIT` 里**一个选项一项**（`wait` / `reuse_window` / `new_window` / `add` /
+`diff` / `merge`，不共用 —— 每项在别的 CLI 里的含义都不同，逐项的注释就是上面这张
+表），认不出就摘掉。两个例外：
+
+- `-d` 对 vim 是**正解**（`vim -d a b` = vimdiff），所以 vim 那一项是 True、保留；
+- `-m`（合并，带 4 个路径）没有等价物：**丢开关、留取值** —— 那四个路径照样当文件
+  打开，总比把用户要编辑的文件一起丢掉好。
+
+emacs 系**没有命令行的 diff 入口**：`emacs --help` 里只有 `--eval EXPR` /
+`--execute EXPR` / `-f FUNC`（没有 `--diff`，也没有 `-e`），`emacsclient` 是
+`-e, --eval`。`-f ediff-files` 也不行 —— 它是交互式函数，会去 minibuffer 提问，不吃
+命令行上的文件名。**所以这块不翻译**：ediff 的两个文件是位置参数（`-d` 的 arity 是 0，
+文件个数与它无关），要重写就得整条命令一起改造，还要处理 Lisp 转义。想 diff 就这么写
+（两条都实测过，pty 里真的开出了 `*Ediff Control Panel*`）：
+
+```
+emacs -nw --eval '(ediff-files "A" "B")'                  # 终端；GUI 版去掉 -nw
+emacsclient -t -e '(progn (ediff-files "A" "B") nil)'     # 必须先有 frame（-t 或 -c）
+```
+
+（`emacsclient -e` 而 daemon 里没有 frame 时，`ediff-files` 会静默返回 nil、什么都不
+显示 —— 实测；`nil` 是为了不让 emacsclient 把求值结果回显。三方 diff 用
+`ediff-files3`，它也存在。nano 则**完全没有** diff 模式。）
+
+老规矩仍然成立：终端 vim 本来就前台阻塞、退出才返回，所以把 `--wait` 摘掉正好
+（GUI 版 gvim / mvim 会 fork 后立刻返回，那要 `-f`（foreground）—— 但本机 `vim -f`
+退出 1、`vim -h` 里也没有，那是 GUI 版才有的开关，所以**不翻译**）；emacsclient 默认
+也阻塞到 server 缓冲区结束，`--wait` 的语义天然满足。
 
 `--dry-run` 会告诉你走哪条：直连打印 `socket <路径> {json}`，CLI 路径打印模拟的命令行。
 

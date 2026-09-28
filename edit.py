@@ -40,6 +40,9 @@
   vim 不支持（只用 +N）。
   --wait / -w 同理只在 VS Code 系有意义：交回 vim 系 CLI 时会被摘掉（vim 没有
   这个选项，-w 还是"把键入的命令写进文件"的意思；而终端 vim 本来就等到退出）。
+  -r / -n / -a 也一样摘掉（vim -r 是恢复交换文件、nano -n 是只写不读、emacs -r 是
+  反色显示…）；-d 只有 vim 是同义（diff 模式）所以保留；-m 合并没有等价物，丢开关
+  但四个路径照开。这几项在 EMIT 里各占一项，逐项注释就是实测出来的含义对照。
   行号只在交回别的 CLI 时才需要翻译：code 系 --goto 文件:行:列（一个目标一份），
   vim 系 +行号。所以绝不能把 -g 原样透传过去：vim -g 是启动 GUI 会 E25
   报错、emacs -g 是 --geometry 会吃掉后面的文件名、nano -g 是 --showcursor。
@@ -985,15 +988,15 @@ def open_request(args, marker=None):
     ['file:///']
     >>> open_request(['--goto=']) is None                           # 空值：忽略
     True
-    >>> open_request(['-m', '/a', '/b', '/base', '/res'])['mergeMode']
+    >>> open_request(['-m', '/a', '/b', '/base', '/result'])['mergeMode']
     True
-    >>> open_request(['--merge', '/a', '/b', '/base', '/res'])['fileURIs']
-    ['file:///a', 'file:///b', 'file:///base', 'file:///res']
-    >>> open_request(['-r', '-m', '/a', '/b', '/base', '/res'])['forceReuseWindow']
+    >>> open_request(['--merge', '/a', '/b', '/base', '/result'])['fileURIs']
+    ['file:///a', 'file:///b', 'file:///base', 'file:///result']
+    >>> open_request(['-r', '-m', '/a', '/b', '/base', '/result'])['forceReuseWindow']
     True
     >>> open_request(['-m', '/a', '/b', '/base']) is None        # 少一个
     True
-    >>> open_request(['-m', '/a', '-r', '/base', '/res']) is None  # 取值又是个选项
+    >>> open_request(['-m', '/a', '-r', '/base', '/result']) is None  # 取值又是个选项
     True
     >>> open_request(['-g']) is None                        # 选项被忽略，没东西可开
     True
@@ -1014,7 +1017,7 @@ def to_msg(tokens, marker=None):
 
     >>> to_msg(normalize(['/no-such-dir/a.txt:3']))['fileURIs']
     ['file:///no-such-dir/a.txt:3']
-    >>> to_msg(normalize(['-m', 'a', 'b', 'base', 'res']))['mergeMode']
+    >>> to_msg(normalize(['-m', 'a', 'b', 'base', 'result']))['mergeMode']
     True
     >>> to_msg(normalize(['--wait', 'a.txt']), '/m')['waitMarkerFilePath']
     '/m'
@@ -1111,27 +1114,50 @@ def plus_col(sep):
 # 每个 kind 怎么把 token 翻译成命令行 —— "针对不同程序翻译"就这一张表：
 #   goto   : (文件, 行号, 列号) -> 片段列表（一个目标一次，多目标就多份 ——
 #            实测 CLI 的 -g 可以重复，报文是累加的）
-#   wait   : --wait / -w 保不保留
+#   wait / reuse_window / new_window / add / diff / merge
+#          : 这类 CLI 认不认这个 VS Code 系开关。认就原样递过去，不认就摘掉
+#            （merge 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
+#            这几个短选项在别的 CLI 里各有别解，每项的注释就是实测记录
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
 EMIT = {
     CLI_KIND_CODE: {
         'goto': lambda file, line, column: ['--goto', goto_target((file, line, column))],
         'wait': True,
+        'reuse_window': True,
+        'new_window': True,
+        'add': True,
+        'diff': True,
+        'merge': True,
         'abspath': True,
     },
     CLI_KIND_VIM: {
         'goto': plus_goto,              # vim -g 是启动 GUI（E25 退出 2），绝不能透传
-        'wait': False,
+        'wait': False,                  # -w 是把键入的命令写进 scriptout
+        'reuse_window': False,          # -r 是列/恢复交换文件
+        'new_window': False,            # -n 是不用交换文件
+        'add': False,                   # -a 是未知选项：Unknown option argument
+        'diff': True,                   # -d 正是 diff 模式（vimdiff），等价，保留
+        'merge': False,                 # -m 是禁止写文件
         'abspath': False,
     },
     CLI_KIND_NANO: {
-        'goto': plus_col(','),          # +行号[,列号]（nano -g 是 --showcursor）
-        'wait': False,
+        'goto': plus_col(','),          # nano -g 是 --showcursor
+        'wait': False,                  # 没有 --wait
+        'reuse_window': False,          # -r <数字>：把文件名当填充宽度
+        'new_window': False,            # -n 是 --noread：只写不读
+        'add': False,                   # -a 是 --atblanks
+        'diff': False,                  # -d 是 --rebinddelete
+        'merge': False,                 # -m 是 --mouse
         'abspath': False,
     },
     CLI_KIND_EMACS: {
-        'goto': plus_col(':'),          # +行号[:列号]（emacs -g 是 --geometry）
-        'wait': False,
+        'goto': plus_col(':'),          # emacs -g 是 --geometry，会吃掉文件名
+        'wait': False,                  # emacsclient 的 -w 是 --timeout=SECONDS
+        'reuse_window': False,          # emacs -r 是 -rv 反色；emacsclient -r 是 --reuse-frame
+        'new_window': False,            # emacs 报未知选项；emacsclient -n 是 --no-wait
+        'add': False,                   # 报未知选项（emacsclient 的 -a 还要参数）
+        'diff': False,                  # -d 是 --display，会吃掉文件名
+        'merge': False,                 # 报未知选项（emacsclient 也不认）
         'abspath': False,
     },
 }
@@ -1164,15 +1190,28 @@ def to_argv(tokens, kind):
     ['--wait', 'a.txt']
     >>> to_argv(normalize(['--wait', 'a.txt']), CLI_KIND_VIM)  # vim 没有 --wait
     ['a.txt']
-    >>> to_argv(normalize(['-m', 'a', 'b', 'base', 'res']), CLI_KIND_CODE)
-    ['-m', 'a', 'b', 'base', 'res']
+    >>> to_argv(normalize(['-m', 'a', 'b', 'base', 'result']), CLI_KIND_CODE)
+    ['-m', 'a', 'b', 'base', 'result']
+    >>> to_argv(normalize(['-m', 'a', 'b', 'base', 'result']), CLI_KIND_VIM)  # 丢开关，留路径
+    ['a', 'b', 'base', 'result']
+    >>> to_argv(normalize(['-d', 'a', 'b']), CLI_KIND_VIM)    # vim -d 正是 diff 模式
+    ['-d', 'a', 'b']
+    >>> to_argv(normalize(['-d', 'a', 'b']), CLI_KIND_NANO)   # nano -d 是 --rebinddelete
+    ['a', 'b']
+    >>> to_argv(normalize(['-r', 'a']), CLI_KIND_VIM)         # vim -r 是恢复交换文件
+    ['a']
     >>> to_argv(normalize(['--', 'a.txt:12']), CLI_KIND_CODE)  # -- 之后原样
     ['--', 'a.txt:12']
     """
 
-    unknown = {                             # 认不出是哪一类：只传文件，行号丢掉
-        'goto': lambda file, line, column: [file],
+    unknown = {
+        'goto': lambda file, line, column: [file], # 认不出是哪一类：只传文件，行号丢掉
         'wait': False,
+        'reuse_window': False,
+        'new_window': False,
+        'add': False,
+        'diff': False,
+        'merge': False,
         'abspath': False,
     }
 
@@ -1192,8 +1231,21 @@ def to_argv(tokens, kind):
         else:                               # ('opt', …)
             _opt, flag, field, values = t
 
+            # 这几个开关是 VS Code 系独有的"打开方式"，别的 CLI 拿到各有别解
+            # （逐项见 EMIT 里那几行注释）：不认就摘掉。各选项各自一项，不共用。
             if field == 'wait' and not emit['wait']:
-                continue                    # 这类 CLI 没有 --wait：摘掉
+                continue
+            if field == 'forceReuseWindow' and not emit['reuse_window']:
+                continue
+            if field == 'forceNewWindow' and not emit['new_window']:
+                continue
+            if field == 'addMode' and not emit['add']:
+                continue
+            if field == 'diffMode' and not emit['diff']:
+                continue
+            if field == 'mergeMode' and not emit['merge']:
+                out.extend(values)          # 合并没有等价物：丢开关，四个路径照开
+                continue
 
             out.append(flag)
             out.extend(values)
@@ -1222,9 +1274,9 @@ def socket_open(sock, msg, timeout=3.0):
         return False, '连不上或超时'
 
     code = http_code(raw)
-    detail = http_body(raw).strip()
+    body = http_body(raw).strip()
 
-    return code == 200, detail or ('HTTP %s' % code)
+    return code == 200, body or ('HTTP %s' % code)
 
 def probe_workspaces(socks, timeout=1.5):
     """并发问每个候选窗口要一次 status，把 authority / workspace 填进候选

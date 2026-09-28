@@ -66,6 +66,16 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
 `-g` 是 `--geometry`，会把后面的文件名吃掉、什么都不打开；nano 的 `-g` 是
 `--showcursor`）。
 
+`--wait` 之外那几个 VS Code 系开关也一并按 kind 处理：`-r` / `-n` / `-a` 交回 vim 系时
+摘掉（`vim -r` 是恢复交换文件、`nano -n` 是"只写不读"、`emacs -r` 是反色显示…），`-d`
+只有 vim 是同义（`vim -d` 就是 vimdiff）所以保留，`-m` 合并没有等价物 —— 丢开关、四个
+路径照开。这几项一个选项一项，逐项含义见 NOTES 的那张实测表。
+
+emacs 系没有命令行的 diff 入口（`emacs --help` 里只有 `--eval`；`emacsclient` 是 `-e`），
+所以 `-d` 摘掉后只是把文件打开 —— 要 diff 就自己 `M-x ediff-files`，或者用
+`emacs --eval '(ediff-files A B)'`（`emacsclient` 得 `-t -e '(progn (ediff-files A B) nil)'`，
+要先有 frame；见 NOTES）。
+
 用 `+行号` 的不止 vim：`nano` 是一类、`emacs` 与 `emacsclient` 是一类。列号只有
 vim 不支持：VS Code 系 `--goto 文件:行:列`、emacs 系 `+N:M`、nano `+N,M`
 （都是 1 起，和我们的写法一致），vim 只用 `+N`。
