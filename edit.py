@@ -43,6 +43,8 @@
   -r / -n / -a 也一样摘掉（vim -r 是恢复交换文件、nano -n 是只写不读、emacs -r 是
   反色显示…）；-d 只有 vim 是同义（diff 模式）所以保留；-m 合并没有等价物，丢开关
   但四个路径照开。这几项在 EMIT 里各占一项，逐项注释就是实测出来的含义对照。
+  另外 -a / -d / --wait 空着（既没文件也没目录）是误用：直接提示退出、不交给 CLI；
+  裸调用与只给 -r / -n 不拦 —— 那是 code 系"开窗口 / 复用窗口 / 新窗口"的既定用法。
   行号只在交回别的 CLI 时才需要翻译：code 系 --goto 文件:行:列（一个目标一份），
   vim 系 +行号。所以绝不能把 -g 原样透传过去：vim -g 是启动 GUI 会 E25
   报错、emacs -g 是 --geometry 会吃掉后面的文件名、nano -g 是 --showcursor。
@@ -751,6 +753,17 @@ OPTIONS = {
     '--wait': ('wait', 0), '-w': ('wait', 0),
 }
 
+# 这几个选项要"有东西可开"才有意义（-a 要把目录加进工作区、-d 要 diff 两个文件、
+# --wait 至少要等一个文件）。空着交给 CLI 只会发个空报文、或让 vim 系开个空编辑器，
+# 所以 main 里直接提示退出。裸调用与 -r / -n 不在此列 —— 那些对 code 系有定义
+# （开窗口 / 复用窗口 / 新窗口）
+#
+# 别把它改成 OPTIONS 的 arity：arity 是"这个选项自己吃几个取值"，而 -d / -a 的文件
+# 是位置参数 —— CLI 自己的声明里 diff 就是 type:"boolean"，args:["file","file"] 只是
+# help 占位符（实测 `a b -d`、`-d a -r b` 它都认）。写成 arity 2 会把这两类打回 CLI，
+# 而且"取值不够"的既定行为是交回 CLI、不是报错，报错还得在这儿单独判
+NEEDS_TARGET = ('addMode', 'diffMode', 'wait')
+
 
 def arg_token(a):
     """一个普通参数 -> token：位置参数那套判断（跳转目标 / 目录 / 文件）
@@ -946,6 +959,9 @@ def open_request(args, marker=None):
     翻不了就交回 CLI：未知选项 / -- / 取值不够 / 没给参数。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
 
+    （-a / -d / --wait 空着的情况走不到这里：main 见到 NEEDS_TARGET 里那几项没有
+    目标就直接提示退出了。）
+
     -g / --goto / --goto=X 被忽略（见 normalize）：行号只认位置参数写法，所以
     `-g f:3` 与 `f:3` 发出的是同一份报文。
 
@@ -1007,6 +1023,34 @@ def open_request(args, marker=None):
     """
 
     return to_msg(normalize(args), marker)
+
+
+def nothing_to_open(tokens):
+    """一个"要打开的东西"都没有：没有文件 / 目录 / 跳转目标，也没有 -m 那类带取值的选项
+
+    认不出来的 token（('other', …)）算"有东西"—— 它们会原样交给 CLI 去理解，没法断定
+    用户没给目标（`--` 之后的字面量就在里面）。main 拿它配 NEEDS_TARGET 用。
+
+    >>> nothing_to_open(normalize(['-d']))
+    True
+    >>> nothing_to_open(normalize([]))
+    True
+    >>> nothing_to_open(normalize(['-d', 'a.txt']))
+    False
+    >>> nothing_to_open(normalize(['-m', 'a', 'b', 'base', 'res']))   # 取值就是路径
+    False
+    >>> nothing_to_open(normalize(['--', 'a.txt']))                   # 认不出的算有东西
+    False
+    """
+
+    for t in tokens:
+        if t[0] == 'other' or t[0] in ('file', 'folder', 'goto'):
+            return False
+
+        if t[0] == 'opt' and t[3]:          # 带取值的选项（-m 的 path1..result）
+            return False
+
+    return True
 
 
 def to_msg(tokens, marker=None):
@@ -1605,6 +1649,14 @@ def main():
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv
     tokens = normalize(args)
+
+    # -a / -d / --wait 要"有东西可开"才有意义（要目录 / 要两个文件 / 至少要一个文件）：
+    # 空着交给 CLI 只会发个空报文，或让 vim 系开个空编辑器。裸调用与 -r / -n 不拦 ——
+    # 那些对 code 系是有定义的（开窗口 / 复用窗口 / 新窗口）
+    if nothing_to_open(tokens) and any(
+            t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
+        sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
+            t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
     # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径

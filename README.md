@@ -42,10 +42,13 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
    URI 里（`file:///x.py:12:3`，冒号不转义）。协议是从 `remote-cli`（`out/server-cli.js`）
    抓包对出来的，字段与它逐字节一致；回复只认 HTTP 200。
    这条路径不需要 PATH 里有 `remote-cli`，也不起 node。
-2. **remote-cli**：没有 socket（桌面版），或参数翻不了（未知选项 / `--wait`
-   但没给文件 / `-m` 的取值没给够 / 无参数）时，照旧找 `code` / `buddycn` /
-   `trae-cn` 去开。
+2. **remote-cli**：没有 socket（桌面版），或参数翻不了（未知选项 / `-m` 的取值
+   没给够 / 无参数）时，照旧找 `code` / `buddycn` / `trae-cn` 去开。
    直连失败也会回退到这里，并在 stderr 留一行提示。
+
+`-a` / `-d` / `--wait` 空着（既没文件也没目录）算误用：直接 `edit: -d 后面没有
+文件或目录` 退出 1，不交给 CLI。裸调用、只给 `-r` / `-n` 不拦 —— 那是 `code` 系
+"开窗口 / 复用窗口 / 新窗口"的既定用法。
 
 `--wait` / `-w` 也走直连：先 mkstemp 一个空 marker，把路径放进报文的
 `waitMarkerFilePath`，窗口关掉文件时删它，我们等它消失 —— 和 `remote-cli` 同机制

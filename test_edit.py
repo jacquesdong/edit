@@ -738,6 +738,48 @@ class FallbackTest(EditCase):
                 self.assertNotIn('socket 打不开', proc.stderr)
 
 
+class NoTargetTest(EditCase):
+    """-a / -d / --wait 空着（没有目标）→ 直接提示退出，不交给 CLI"""
+
+    def test_needs_target_options_error(self):
+        for args in (['-d'], ['--diff'], ['-a'], ['--add'], ['--wait'], ['-w'],
+                     ['-r', '-d']):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('没有文件或目录', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_has_target_is_fine(self):
+        """有目标就不拦：-d 跟两个文件、--wait 跟一个文件、-a 跟目录"""
+
+        for args in (['-d', self.a, self.b], ['--wait', self.a], ['-a', self.dir]):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 7, proc.stderr)   # 交给假 CLI
+                self.assertNotIn('没有文件或目录', proc.stderr)
+
+    def test_bare_and_window_flags_still_fall_back(self):
+        """裸调用 / 只给 -r / -n / -g：照旧交给 CLI（code 系的开窗口/复用窗口有定义）"""
+
+        for args in ([], ['-r'], ['--reuse-window'], ['-n'], ['-g']):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 7, proc.stderr)
+                self.assertNotIn('没有文件或目录', proc.stderr)
+
+    def test_unknown_token_counts_as_target(self):
+        """-- 之后的字面量算"有东西"：交回 CLI 让它去理解，不能报错"""
+
+        proc = self.run_edit('-d', '--', 'a.txt')
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertNotIn('没有文件或目录', proc.stderr)
+
+
 def load_fixtures():
     """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）"""
 

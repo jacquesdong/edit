@@ -105,8 +105,13 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   ├─ 参数能翻译成 open 报文 → 直连 socket（不找 CLI、不起 node）
   │     ├─ HTTP 200 → 结束；带 --wait 就再等窗口删 marker（见下）
   │     └─ 否则 stderr 提示 + 回退 CLI
-  └─ 翻不了（未知选项 / -- / 无参数 / --wait 但没给文件）或没有 socket
+  └─ 翻不了（未知选项 / -- / 无参数 / 没有 socket）
         → 交给 remote-cli（code / buddycn / trae-cn，从 PATH 或 EDIT_CLI 找）
+
+先拦一道：-a / -d / --wait 空着（没文件也没目录）→ `edit: -d 后面没有文件或
+目录`，退出 1，不交给 CLI。裸调用与只给 -r / -n 照旧走上面的回退 —— 实测那几个
+在真 CLI 里都会真的发报文（裸调用 = 开/聚焦窗口，-r = 复用窗口，-n = 新窗口），
+空发但都有定义。
 ```
 
 带 `--interactive` 时先多一步：列出窗口让你挑，把挑中的 socket 写回
