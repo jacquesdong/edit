@@ -158,7 +158,7 @@ def normalize(msg):
 
         return v
 
-    out = {}
+    out: dict[str, object] = {}          # 值有 str / list[str] / bool 三种，别推成 dict[str, str]
 
     for k, v in msg.items():
         if k == 'waitMarkerFilePath':

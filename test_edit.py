@@ -29,6 +29,9 @@ EDIT = os.path.join(HERE, 'edit.py')
 FIXTURES = os.path.join(HERE, 'fixtures', 'protocol.json')
 
 spec = importlib.util.spec_from_file_location('edit', EDIT)
+
+assert spec is not None and spec.loader is not None      # 本地文件，必然能拿到
+
 edit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(edit)
 
@@ -431,6 +434,21 @@ class CliArgvTest(EditCase):
                          ['+12,3', 'a.txt'])
         self.assertEqual(edit.cli_argv(['--goto', 'a.txt:12:3'], edit.CLI_KIND_EMACS),
                          ['+12:3', 'a.txt'])
+
+    def test_token_shape_guard(self):
+        """形状外的 token 直接炸：token 联合是穷尽的，漏一种就该在这儿暴露
+
+        故意塞一个形状不对的 token —— 两处都得 ignore 类型检查，因为要测的正是
+        "运行期真收到怪形状"时 case _ 有没有兜住。
+        """
+
+        bogus = [('bogus', 'x', 'y')]
+
+        with self.assertRaises(AssertionError):
+            edit.to_argv(bogus, edit.CLI_KIND_CODE)      # type: ignore[arg-type]
+
+        with self.assertRaises(AssertionError):
+            edit.to_msg(bogus)                           # type: ignore[arg-type]
 
     def test_plus_kinds(self):
         """nano / emacs / emacsclient 各成一类，行号写法与 vim 相同（+N 前置）"""
@@ -899,9 +917,9 @@ class ProcCase(EditCase):
 
             try:
                 edit.main()
-                code = 0
+                code: str | int | None = 0
             except SystemExit as e:
-                code = e.code
+                code = e.code        # SystemExit.code 就是 str / int / None
 
         return out.getvalue(), err.getvalue(), code
 
@@ -1098,7 +1116,11 @@ class WaitTest(EditCase):
     def test_wait_marker_returns_when_deleted(self):
         marker = self._touch('marker')
 
-        threading.Timer(0.05, lambda: os.path.exists(marker) and os.unlink(marker)).start()
+        def remove() -> None:            # 别用 lambda + and：unlink 返回 None，读起来像有话要说
+            if os.path.exists(marker):
+                os.unlink(marker)
+
+        threading.Timer(0.05, remove).start()
         edit.wait_marker(marker, interval=0.01)
 
         self.assertFalse(os.path.exists(marker))

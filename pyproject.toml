@@ -30,6 +30,13 @@ select = ["E4", "E7", "E9", "F"]
 # （全量重排 600+ 行，会打散魔尾逗号与等号对齐）
 quote-style = "single"
 
+[tool.mypy]
+python_version = "3.10"
+# 无标注的函数体也检查 —— mypy 默认对没标注的函数直接放行，那就是"全绿但没查"
+check_untyped_defs = true
+# 暂时不上 --strict（还有 91 条），先把这三个文件守住
+files = ["edit.py", "test_edit.py", "tools/capture_cli.py"]
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.1",

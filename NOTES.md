@@ -434,25 +434,27 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
    + `make_proc()` 造假进程表，见 `FindSocketsTest` / `ProbeTest` / `ListTest` /
    `InitTest`（进程内跑 `main()`，`sys.argv` / `stdout` / `input` 都打补丁）。
 
-7. token 分层重写（`match` + 类型化 + mypy 接进检查）—— **已铺路，未动工**：
+7. ~~token 分层重写（`match` + 类型化 + mypy 接进检查）~~ 已做（4 步：`34f0489` 定类型、
+   `a474c65` to_msg、`c8754ea` to_argv + EMIT 行、`79f65ff` 兜底与标注）：
 
-   - 铺路已完成：`pyproject.toml` 里 `requires-python = ">=3.10"`、ruff
-     `target-version = "py310"`；mypy 与 ruff 已进 `[dependency-groups] dev`
-     （`uv.lock`，ruff 0.16.9 / mypy 2.3.1）。**mypy 现在还没接进检查流程** ——
-     代码里 0 个类型标注，直接跑是"全绿但没检查"。
-   - 真正的分派只有两处循环：`to_msg`（4 支，`edit.py:1086-1095`）、`to_argv`
-     （4 支，`edit.py:1278-1284`）；全文件 `t[0]` 分派共 12 处（其余是
-     `has_wait` / `NEEDS_TARGET` 那种一行式过滤）。token 形状：
-     `('other', a)` / `('file'|'folder', p)` / `('goto', f, line, col)` /
-     `('opt', flag, field, values)`。
-   - 目标：给 token 定类型（每形状一个 `NamedTuple` —— 或是带 `Literal` 标签的元组联合
-     `Token: TypeAlias = ...`；注意 **`type X = ...` 语句是 3.12+**，3.10 上只能用
-     `TypeAlias`），分派换成 `match`（形状写在 `case` 里，不必在 `else` 里手工
-     解包），`field` 窄化后 `to_argv` 那串 `if field == 'wait' and not emit['wait']`
-     可以并进 `EMIT` 查表；漏一种 token 用 `case _: raise AssertionError(t)` 兜住
-     （`typing.assert_never` 是 3.11+，不引 `typing_extensions`，保住运行期零依赖）。
-   - 代价提醒：`match` 是 3.9 的**语法错误**，解析期就炸、程序内做不了友好提示
-     （README 开头已写明最低 3.10）；本机只有 3.12，旧版本机器没法实测。
+   - token 是**带 `Literal` 标签的元组联合**（`Token` / `ArgToken` / `GotoTarget`，
+     每个形状还各有一个别名）。**没选 NamedTuple**：运行时表示不变 → doctest 与调试
+     输出逐字不变；字段名交给 `match` 的 value pattern（`case ('opt', flag, field, values)`）。
+     两者启动代价几乎一样（都 ≈ +4~5 ms，主要是 `import typing`），而 NamedTuple 会把
+     13 行 doctest 的期望输出从最长 90 列推到 119 列（repr 单行、doctest 折不了）。
+   - `to_msg` / `to_argv` 的分派换成 `match` + `case _: raise AssertionError(t)` 兜底
+     （`typing.assert_never` 是 3.11+，手写；实测 mypy 不报 unreachable）。
+   - 报文与 EMIT 行各有一个 TypedDict（`OpenMsg` / `EmitRow`）。`waitMarkerFilePath`
+     与 `NotRequired` 同理（3.11+）：用 `total=False` 继承表达"选填"。
+   - mypy 接进门禁：`[tool.mypy]`（`check_untyped_defs` + `files` 三个文件），
+     `uv run mypy` 干净。它顺带抓出并修掉：test 里 `spec` 可能是 None、
+     `SystemExit.code` 的类型、`lambda: … and os.unlink(…)`（返回 None 还当值用）、
+     `capture_cli` 的 `out` 被推成 `dict[str, str]`。
+   - 还剩两件（都不急）：1）`to_argv` 那串 `if field == 'wait' and not emit['wait']`
+     可以并进 `EMIT` 查表 —— 前提是先统一 `field`（`wait` / `addMode`…）与 EMIT 键
+     （`wait` / `reuse_window`…）的命名；2）`--strict` 还有 91 条，要上得另开一轮。
+   - 门槛提醒仍然成立：`match` 是 3.9 的**语法错误**，解析期就炸、程序内做不了友好
+     提示（README 开头已写明最低 3.10）；本机只有 3.12，旧版本机器没法实测。
 
 ## 历史是怎么来的
 

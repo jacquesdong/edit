@@ -99,6 +99,7 @@ dev 工具（ruff / mypy）钉在 `uv.lock` 里，命令一律走 `uv run`（首
 ```bash
 uv sync                          # 建 .venv 并按 uv.lock 装 ruff / mypy（首次，之后可省）
 uv run ruff check .              # 0.16.9，配置在 pyproject.toml 的 [tool.ruff]
+uv run mypy                      # 2.3.1，配置在 [tool.mypy]（files 已列全，无需传参）
 uv run python3 edit.py --self-test      # 纯函数 doctest（不开窗口、毫秒级）
 uv run python3 test_edit.py -v          # 回归：假窗口 + 假 CLI，不碰真实 IDE
 uv run python3 -m doctest tools/capture_cli.py   # 抓包工具的 doctest
