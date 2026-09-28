@@ -69,7 +69,7 @@ remote-cli 一模一样（它也是 createWaitMarkerFile + 每秒 existsSync 轮
 所以 git commit 之类的场景同样等得住，而且不起 node。
 """
 
-from __future__ import print_function, unicode_literals
+from __future__ import annotations       # 注解不求值：别名放哪都行，运行期也不构造它们
 
 import argparse
 import json
@@ -85,6 +85,7 @@ import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
+from typing import Literal, TypeAlias
 
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
@@ -368,7 +369,7 @@ def cli_kind(cli):
 
     return None
 
-def split_goto(arg):
+def split_goto(arg: str) -> tuple[str, str, str | None] | None:
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
     和 parse_goto 的差别：不做"真实文件优先"的判断。parse_goto 靠它把行号/列号
@@ -395,7 +396,7 @@ def split_goto(arg):
 
     return m.group(1), m.group(2), m.group(3)
 
-def parse_goto(arg):
+def parse_goto(arg: str) -> tuple[str, str, str | None] | None:
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
 
     真实存在的文件优先（文件名里可以带冒号）；目录配行号没有意义。
@@ -742,6 +743,33 @@ def socket_status(sock, timeout=1.5):
 
     return parse_status(text)
 
+# token 的形状 —— 一个生产者（normalize / arg_token）、两个消费者（to_msg / to_argv）：
+#   opt    认得的选项 + 它的取值（开关选项是 []）
+#   goto   文件:行号[:列]（列可能没有）
+#   file / folder   普通路径（是不是目录在 normalize 里就定了）
+#   other  认不出来的：不认识的选项、取值不够的选项、-- 之后的字面量
+#
+# 保留元组形态（而不是 NamedTuple）：repr 紧凑、doctest 与调试输出都不用改；而字段名
+# 由 match 的 value pattern 给（`case ('opt', flag, field, values)`），够用了。
+OptionField: TypeAlias = Literal[
+    'forceReuseWindow',
+    'forceNewWindow',
+    'addMode',
+    'diffMode',
+    'mergeMode',
+    'wait',
+]
+
+OptToken: TypeAlias = tuple[Literal['opt'], str, OptionField, list[str]]
+GotoToken: TypeAlias = tuple[Literal['goto'], str, str, str | None]
+FileToken: TypeAlias = tuple[Literal['file'], str]
+FolderToken: TypeAlias = tuple[Literal['folder'], str]
+OtherToken: TypeAlias = tuple[Literal['other'], str]
+
+Token: TypeAlias = OptToken | GotoToken | FileToken | FolderToken | OtherToken
+ArgToken: TypeAlias = GotoToken | FileToken | FolderToken    # arg_token 只产这三种
+
+
 # 认识的参数：flag -> (field, arity)
 # flag:  命令行选项
 # field: 报文字段
@@ -750,7 +778,7 @@ def socket_status(sock, timeout=1.5):
 # -g / --goto 不在这里：它们只是"下一个参数是跳转目标"的提示，而 edit 对任何
 # 文件:行号 参数本来就跳转，所以直接忽略（见 normalize）。内联写法 --goto=X / -g=X
 # 也不特判：上游自己都不认那种写法，所以跟别的"不认识的选项"一样原样交给 CLI。
-OPTIONS = {
+OPTIONS: dict[str, tuple[OptionField, int]] = {
     '-r': ('forceReuseWindow', 0), '--reuse-window': ('forceReuseWindow', 0),
     '-n': ('forceNewWindow', 0), '--new-window': ('forceNewWindow', 0),
     '-a': ('addMode', 0), '--add': ('addMode', 0),
@@ -768,10 +796,10 @@ OPTIONS = {
 # 是位置参数 —— CLI 自己的声明里 diff 就是 type:"boolean"，args:["file","file"] 只是
 # help 占位符（实测 `a b -d`、`-d a -r b` 它都认）。写成 arity 2 会把这两类打回 CLI，
 # 而且"取值不够"的既定行为是交回 CLI、不是报错，报错还得在这儿单独判
-NEEDS_TARGET = ('addMode', 'diffMode', 'wait')
+NEEDS_TARGET: tuple[OptionField, ...] = ('addMode', 'diffMode', 'wait')
 
 
-def arg_token(a):
+def arg_token(a: str) -> ArgToken:
     """一个普通参数 -> token：位置参数那套判断（跳转目标 / 目录 / 文件）
 
     行号只认这种写法，所以 parse_goto 是"是否跳转"的唯一裁判。
@@ -795,16 +823,10 @@ def arg_token(a):
     return ('file', a)
 
 
-def normalize(args):
+def normalize(args: list[str]) -> list[Token]:
     """命令行 -> token 列表：只扫一次，后面两个翻译后端都吃它
 
-    token 是 tuple：
-    - ('opt', flag, field, values)   认得的选项 + 它的取值（开关选项是 []）
-    - ('goto', file, line, column)   文件:行号[:列]
-    - ('file', path)
-    - ('folder', path)
-    - ('other', orig)                认不出来的：不认识的选项、取值不够的选项、
-                                     -- 之后的字面量
+    产出的 token 形状见上面的 `Token` 别名（元组，只有那 5 种）。
 
     -g / --goto 只是"下一个参数是跳转目标"的提示，而 edit 对任何带行号的参数本来就置
     gotoLineMode，所以它们被忽略、也不消费参数 —— 后面那个参数自己按位置参数处理
@@ -839,7 +861,7 @@ def normalize(args):
     [('other', '--'), ('other', 'a.txt:3')]
     """
 
-    out = []
+    out: list[Token] = []
     literal = False
     i = 0
 
@@ -882,7 +904,7 @@ def normalize(args):
     return out
 
 
-def has_wait(tokens):
+def has_wait(tokens: list[Token]) -> bool:
     """token 里有没有 --wait / -w（-- 之后的不算：normalize 已把它整成 other）
 
     >>> has_wait(normalize(['--wait', 'a.txt']))
@@ -1048,7 +1070,7 @@ def nothing_to_open(tokens):
     return True
 
 
-def to_msg(tokens, marker=None):
+def to_msg(tokens: list[Token], marker: str | None = None):
     """token -> open 报文（socket 后端）
 
     见到 ('other', …) 就返回 None —— 交回 CLI：认不出来的我们不猜，让 CLI 自己
@@ -1219,7 +1241,7 @@ EMIT = {
 }
 
 
-def to_argv(tokens, kind):
+def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
     """token -> 交给 CLI 的参数（CLI 后端，按 kind 查 EMIT）
 
     >>> to_argv(normalize(['a.txt:12']), CLI_KIND_CODE)      # 插 --goto
@@ -1271,8 +1293,8 @@ def to_argv(tokens, kind):
         'abspath': False,
     }
 
-    emit = EMIT.get(kind, unknown)
-    out = []
+    emit = unknown if kind is None else EMIT.get(kind, unknown)
+    out: list[str] = []
 
     for t in tokens:
         if t[0] == 'other':
@@ -1312,7 +1334,7 @@ def to_argv(tokens, kind):
     return out
 
 
-def cli_argv(args, kind):
+def cli_argv(args: list[str], kind: str | None) -> list[str]:
     """命令行 -> 交给 CLI 的参数（normalize + to_argv，测试走这个缝）"""
 
     return to_argv(normalize(args), kind)
