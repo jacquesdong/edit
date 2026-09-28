@@ -405,8 +405,45 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
    不带文件、与 `--list` 冲突、取消（q / EOF）都报错退出。挑别的 IDE 时只打开、
    不激活那个窗口（限制见上，与官方 CLI 一致，不用再查）。
 3. 桌面版（macOS / Linux 桌面）其实也有 `vscode-ipc-*.sock`，只是被 `find_sockets()`
-   的 node 判据过滤了。放宽判据即可复用同一条直连路径。
-4. ~~回归脚本还能补：`status` 探测、`--list` / `--init` 的输出~~ 已补：`PROC` 可注入
+   的 node 判据过滤了。放宽判据即可复用同一条直连路径。**暂时不做**，记下要留意的点：
+
+   - 那条判据现在**三处共用**：窗口发现（`find_sockets`）、`find_remote_cli`、
+     `cli_kind` 的兜底 —— 放宽会同时影响这三处，别只改一处；
+   - 未决的是"怎么把桌面版窗口 socket 和普通 unix socket 区分开"：看路径形态
+     （如 `$TMPDIR` 下的 `vscode-ipc-*`）还是对候选发一次只读 `{"type":"status"}`
+     探活，各有代价（前者可能误收别人的 socket，后者多一次往返）；
+   - 手边**没有桌面版环境可实测**，只能靠 fixtures + 假 `/proc` 推 —— 落地前先想清楚
+     怎么验证。
+
+4. `goto` 渲染的优化（**暂时不做**；第一条是纯重构，第二条**会改行为**，别当成顺手做）：
+
+   - `emit['goto']` 现在吃三个参数，而它的数据源本来就是三元组（token
+     `('goto', f, line, c)`），于是**唯一**那处调用要 `*` 解包（`to_argv` 里
+     `out.extend(emit['goto'](*t[1:]))`）。统一成"吃一个跳转目标元组"后 `*` 消失，
+     也和 `goto_target(goto)` 同风格；
+   - 表里其实是**三种**形状，不是两种：
+     - **inline**（目标与路径同一个串）：code 的 `--goto f:3:5`；
+     - **plus**（`+N[:C]` 放在文件名前）：vim / nano / emacs；
+     - **只留文件**：认不出的那一类（`[file]`，**行号丢掉**）——不是 inline。
+     前两种可收成 `goto_inline(flag)` / `goto_plus(sep)` 两个工厂（5 个 lambda/函数
+     变 2 个，表里那 5 行的差异就看得见了；`plus_goto` 同时成了 `plus_col(None)` 的
+     特例，条件是放宽成 `if sep and column`）。但**认不出的那类不能用
+     `goto_inline(None)` 表达** —— 它会连行号一起拼回去，那是行为变化；要收它得单独
+     给一维（如"带不带行号"）或干脆留着一项；
+   - 顺带补一句 docstring：`goto_target` 自己 `abspath` 是必需的 —— 末尾那次
+     `emit['abspath']` 逐个元素判 `os.path.exists`，而跳转目标已被拼成一个字符串
+     （`/abs/f:3`），`exists` 必然为假：够不着。那条统一步骤只对 `file` / `folder`
+     那种裸路径有效。
+
+   （记的时候是"两处调用 + 两种形状"，后来 `-g` 改成直接忽略（翻译分支连它那次
+   `emit['goto'](*goto)` 一起没了，`split_goto` 现在只被 `parse_goto` 调）、认不出的
+   goto 改成只传文件，所以要按上面这版看。）
+
+5. `cli_argv(args, kind)` 是**测试缝**：`test_edit.py` 26 处用它换一行的可读，而生产
+   路径不能用它（同一份 token 要喂 `to_msg` 和 `to_argv`，粘回去就等于扫两遍）。
+   要不要在 docstring 里点明这一点、或干脆挪进测试文件，**暂时不动**。
+
+6. ~~回归脚本还能补：`status` 探测、`--list` / `--init` 的输出~~ 已补：`PROC` 可注入
    + `make_proc()` 造假进程表，见 `FindSocketsTest` / `ProbeTest` / `ListTest` /
    `InitTest`（进程内跑 `main()`，`sys.argv` / `stdout` / `input` 都打补丁）。
 
