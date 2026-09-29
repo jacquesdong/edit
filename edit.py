@@ -17,6 +17,9 @@
                                只删 $XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录里的，
                                挨个打印它的创建时间和路径；--dry-run 只看不删）
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
+  edit --debug                 把吞掉的失败原因（socket 连不上 / 超时 / 被拒…）
+                               打到 stderr；EDIT_DEBUG=1 等价，空 / 0 / false / f /
+                               off / no / n 都算关
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                    （普通终端里没有 hook 时用这个）
@@ -92,11 +95,32 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Literal, NamedTuple, TypeAlias, TypedDict
 
+import logging
+
+# 被吞掉的失败原因统一走它：logging 默认写 stderr，且不配 handler 时 debug 会被
+# 丢掉，所以默认静默照旧，只有 --debug / EDIT_DEBUG=1（见 env_flag）才打得出来。
+#
+# 埋点约定 '<动作> <对象>: %r'（%r 自带 errno 和 strerror），且只记"低频、终端性"的
+# 失败：/proc 扫描、lstat 竞态那种几百次的高频预期失败别逐条记，否则一开就刷屏。
+#
+# 带 exc_info 的只有 socket_request 一处：那个 try 覆盖 connect / sendall / recv 多个
+# 调用点，栈的行号能定位到是哪一步；单调用点的栈只有自己一帧，加了纯粹是噪音。
+logger = logging.getLogger(__name__)
+
+# 日志格式：LOG_FORMAT_DEBUG 就是常规格式再挂一段 [文件:行号 函数] —— 排查那几条被
+# 吞掉的失败时，最需要知道的正是"谁吞的"（file:line 也正好是终端里能点的形状）
+LOG_FORMAT = '%(asctime)s.%(msecs)03d <%(levelname).1s> %(message)s'
+LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filename)s:%(lineno)d %(funcName)s]'
+
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
 
 # 挑窗口时不想用 fzf 就设成 0 / off / never（脚本、测试）
 EDIT_FZF = 'EDIT_FZF'
+
+# 把吞掉的失败原因打到 stderr（排查用）：非空即开，哪几个算关见 ENV_OFF
+# （不写死取值，免得和 ENV_OFF 漂 —— 这里曾经写过 never，而 ENV_OFF 里没有）
+EDIT_DEBUG = 'EDIT_DEBUG'
 
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
 
@@ -177,7 +201,8 @@ def choose_cli_exe(remote_cli_dir):
 
     try:
         names = sorted(os.listdir(remote_cli_dir))
-    except OSError:
+    except OSError as e:
+        logger.debug('listdir %s: %r', remote_cli_dir, e)
         return None
 
     for name in names:
@@ -306,6 +331,7 @@ def find_cli():
     for choice in finders:
         cli = choice()
         if cli:
+            logger.debug('cli from %s: %s', choice.__name__, cli[0])
             return cli
 
 def split_cmd(v):
@@ -329,7 +355,8 @@ def split_cmd(v):
 
     try:
         parts = shlex.split(v)
-    except ValueError:
+    except ValueError as e:
+        logger.debug('shlex.split(%r): %r', v, e)     # 多半是引号没配对
         return None
 
     if not parts:
@@ -536,7 +563,8 @@ def unix_bind_paths() -> dict[int, str] | None:
                 if SOCK_PREFIX not in fields[7]:
                     continue
                 ino2sock[int(fields[6])] = fields[7]
-    except OSError:
+    except OSError as e:
+        logger.debug('read %s/net/unix: %r', PROC, e)
         return None
 
     return ino2sock
@@ -719,6 +747,10 @@ def socket_request(sock, msg, timeout=1.5):
     协议就是 remote-cli 自己那套：POST / + JSON，回复是 chunked。连不上 / 超时
     一律返回 None 且不抛异常。
 
+    失败原因（路径没了 / 被拒 / 超时）走 logging.debug：调用方只拿到一个 None，
+    想区分是哪种就得 --debug / EDIT_DEBUG=1 把 errno 打出来。socket_status 与
+    socket_open 都从这儿过，所以一处埋点就够。
+
     >>> socket_request('/no-such.sock', {'type': 'status'}, timeout=0.1) is None
     True
     """
@@ -744,7 +776,8 @@ def socket_request(sock, msg, timeout=1.5):
                     break
                 chunks.append(data)
                 total += len(data)
-    except OSError:
+    except OSError as e:
+        logger.debug('socket %s: request failed, %r', sock, e, exc_info=True)
         return None
 
     return b''.join(chunks)
@@ -769,19 +802,24 @@ def socket_status(sock, timeout=1.5):
     """直连窗口 socket 问一次只读 status，返回 (authority, workspace)
 
     任何失败（连不上 / 超时 / 解析不了）都返回 (None, None) 且不抛异常 ——
-    它在并发探测的线程里跑。
+    它在并发探测的线程里跑。失败原因走 logger.debug（--debug / EDIT_DEBUG=1 才打）：
+    调用方看到的 (None, None) 分不出"窗口死了"和"窗口活着但 status 读不懂"。
     """
 
     raw = socket_request(sock, {'type': 'status'}, timeout)
     if not raw:
+        # 连不上 / 超时已在 socket_request 里记过原因，这里专指"连上了但没回数据"
+        logger.debug('status %s: empty reply', sock)
         return None, None
 
     try:
         text = json.loads(http_body(raw))
-    except ValueError:
+    except ValueError as e:
+        logger.debug('status %s: JSON parse failed, %r; reply head %r', sock, e, raw[:120])
         return None, None
 
     if not isinstance(text, str):
+        logger.debug('status %s: not a string; reply head %r', sock, raw[:120])
         return None, None
 
     return parse_status(text)
@@ -977,7 +1015,8 @@ def make_marker():
 
     try:
         fd, path = tempfile.mkstemp(prefix='edit-wait-')
-    except OSError:
+    except OSError as e:
+        logger.debug('mkstemp: %r', e)      # 造不出来 --wait 就静默退化成不等
         return None
 
     os.close(fd)
@@ -1475,7 +1514,8 @@ def sock_mtime(path: str) -> float | None:
     """
     try:
         return os.stat(path).st_mtime
-    except OSError:
+    except OSError as e:
+        logger.debug('stat %s: %r', path, e)
         return None
 
 
@@ -1616,8 +1656,9 @@ def prune_sockets(dry_run: bool = False) -> PruneResult | None:
     for d in prune_dirs():
         try:
             names = sorted(os.listdir(d))
-        except OSError:
-            continue                    # 目录读不到就跳过
+        except OSError as e:
+            logger.debug('listdir %s: %r', d, e)    # 读不到就跳过这个目录
+            continue
 
         for name in names:
             if not (name.startswith(SOCK_PREFIX) and name.endswith('.sock')):
@@ -1791,6 +1832,7 @@ def fzf_pick(socks):
 
     n = socket_number(proc.stdout)
     if not n:
+        logger.debug('fzf output has no socket number: %r', proc.stdout)
         return None
 
     return pick_socket(socks, n)
@@ -1845,6 +1887,17 @@ def print_usage():
 
     print(__doc__)
 
+# env_flag() 认的"关"：置空、假、关闭、否（大小写由 env_flag 统一折成小写）
+ENV_OFF = ('', '0', 'false', 'f', 'off', 'no', 'n')
+
+def env_flag(name):
+    """环境变量开关：ENV_OFF 里那几个都算关（大小写不敏感），其余非空算开
+
+    argparse 的 default 只做真值判断，所以得在这儿先把 '0' / 'FALSE' 这种字符串
+    折成 False，否则 EDIT_DEBUG=0 反而会打开调试。
+    """
+    return os.environ.get(name, '').lower() not in ENV_OFF
+
 def build_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
@@ -1855,6 +1908,7 @@ def build_args():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
+    parser.add_argument('--debug', action='store_true', default=env_flag(EDIT_DEBUG))
 
     flags, args = parser.parse_known_args()
 
@@ -1867,6 +1921,15 @@ def main():
             sys.exit('edit --usage 不接受文件参数')
         print_usage()
         return
+
+    # 默认 WARNING 而不是 INFO：埋点全是 debug，用户可见的失败走 sys.exit / 手写
+    # stderr，所以这里再高一点，等于把"默认静默"变成结构保证 —— 以后谁加了
+    # logger.info(...) 也不会漏到用户面前（--debug 才看得见）
+    logging.basicConfig(
+        level=logging.DEBUG if flags.debug else logging.WARNING,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        format=LOG_FORMAT_DEBUG if flags.debug else LOG_FORMAT,
+    )
 
     # --prune 和打开文件无关，放在最早：它不碰 tokens，也不该被后面那些检查影响
     if flags.prune:
@@ -1963,16 +2026,26 @@ def main():
     # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
 
+    if not sock:
+        # 不在 IDE 终端里本来就该走 CLI，记一条好回答"为什么这次没直连"
+        logger.debug('no %s, falling back to cli', IPC_HOOK)
+
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
     marker = make_marker() if sock and has_wait(tokens) else None
     msg = to_msg(tokens, marker) if sock else None
 
+    if sock and msg is None:
+        logger.debug('cannot build socket request, falling back to cli')
+
     if msg:
+        req = 'socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False))
+
         if flags.dry_run:
-            print('socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False)))
+            print(req)
             remove_marker(marker)       # 没真发出去，别把临时文件留在 /tmp
             return
 
+        logger.debug('%s', req)         # 真发出去的那一份，和 --dry-run 打的是同一个串
         ok, detail = socket_open(sock, msg)
 
         if ok:
@@ -1992,12 +2065,13 @@ def main():
     # cli 是 argv 列表：[可执行文件, 自己配置里的参数...]（如 EDITOR='vim -u NONE'）
     kind = cli_kind(cli[0])
     argv = cli + to_argv(tokens, kind)     # 按 kind 翻译（EMIT 表）
+    line = shlex.join(argv)                # 可以直接复制执行的一行（bash/fish 都认）
 
     if flags.dry_run:
-        # 拼成可以直接复制执行的一行（bash/fish 都认）
-        print(shlex.join(argv))
+        print(line)
         return
 
+    logger.debug('exec %s', line)          # 真正执行的命令，和 --dry-run 打的是同一个串
     os.execv(cli[0], argv)
 
 if __name__ == '__main__':
