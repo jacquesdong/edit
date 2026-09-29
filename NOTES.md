@@ -145,7 +145,9 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   选中项从它的 stdout 读回来，按行首编号反查候选项（`socket_number()`）；
 - 没选中（Esc / Ctrl-C）、认不出行、拉不起来：一律落回"列编号 + 读一行"那套，
   行为和不装 fzf 时一模一样；
-- `EDIT_FZF=0 / off / never` 显式关（测试里必须关，否则会真拉起一个选择器）。
+- `EDIT_FZF` 设成 `ENV_OFF` 那套（空 / 0 / false / f / off / no / n / never，大小写
+  不敏感）就显式关 —— 和 `EDIT_DEBUG` 共用 `env_flag()`，不各写一套；测试里必须关
+  （否则会真拉起一个选择器）。
 
 ### 命令行只扫一次：normalize + 两个后端
 

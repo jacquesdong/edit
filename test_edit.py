@@ -874,7 +874,7 @@ def make_proc(root, windows):
 class ProcCase(EditCase):
     """假 /proc + 假窗口：窗口发现、status 探测、--list / --init 的公共环境"""
 
-    fzf = '0'                       # 默认关掉 fzf（FzfTest 里改成 ''）
+    fzf = '0'                       # 默认关掉 fzf（FzfTest 直接 patch use_fzf）
 
     def setUp(self):
         super().setUp()
@@ -1607,9 +1607,18 @@ class UseFzfTest(unittest.TestCase):
             self.assertEqual(edit.use_fzf(), want)
 
     def test_off_values(self):
-        for off in ('0', 'off', 'never'):
+        """ENV_OFF 那一套（大小写不敏感）都算关 —— 和 EDIT_DEBUG 共用同一个判据"""
+
+        for off in edit.ENV_OFF + ('OFF', 'Never', 'FALSE', 'No'):
             with self.subTest(off):
                 self.check(self.env(**{edit.EDIT_FZF: off}), True, True, False)
+
+    def test_explicit_on(self):
+        """显式设成"开"的值照样用 fzf（不是只看"设没设"）"""
+
+        for on in ('1', 'yes', 'always'):
+            with self.subTest(on):
+                self.check(self.env(**{edit.EDIT_FZF: on}), True, True, True)
 
     def test_needs_tty(self):
         self.check(self.env(), False, True, False)

@@ -21,13 +21,14 @@
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
   edit --debug                 把吞掉的失败原因（socket 连不上 / 超时 / 被拒…）
                                打到 stderr；EDIT_DEBUG=1 等价，空 / 0 / false / f /
-                               off / no / n 都算关
+                               off / no / n / never 都算关（EDIT_FZF 同一套）
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                    （普通终端里没有 hook 时用这个）
   edit --interactive <文件...>     列出窗口并挑一个，在挑中的那个里打开文件
                                    （普通终端里没有 hook、又想指定窗口时用这个）
-                                   （装了 fzf 就用它挑；EDIT_FZF=0 关掉，改输编号）
+                                   （装了 fzf 就用它挑；EDIT_FZF=0 关掉，改输编号 ——
+                                   关的值同 --debug：空 / 0 / false / off / no / n / never）
 
   注意 fish 下不能写 eval (edit --init fish)：fish 的 eval 会把多行输出
   用空格拼成一条命令，必须用 | source 才能逐行执行。
@@ -117,11 +118,11 @@ LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filename)s:%(lineno)d %(funcName)s]'
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
 
-# 挑窗口时不想用 fzf 就设成 0 / off / never（脚本、测试）
+# 挑窗口时不想用 fzf 就设成 ENV_OFF 那套（'' / 0 / false / off / no / n / never，
+# 大小写不敏感）—— 和 EDIT_DEBUG 同一个判据（env_flag），不在这儿写死取值
 EDIT_FZF = 'EDIT_FZF'
 
 # 把吞掉的失败原因打到 stderr（排查用）：非空即开，哪几个算关见 ENV_OFF
-# （不写死取值，免得和 ENV_OFF 漂 —— 这里曾经写过 never，而 ENV_OFF 里没有）
 EDIT_DEBUG = 'EDIT_DEBUG'
 
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
@@ -1835,12 +1836,15 @@ def use_fzf():
     """挑窗口时该不该用 fzf：没被关掉、有 fzf、且 stdin 是 tty
 
     stdin 不是 tty 就不用（printf '3\\n' | edit --interactive 是脚本用法，
-    而且 fzf 要独占终端）；EDIT_FZF=0 / off / never 显式关掉。
+    而且 fzf 要独占终端）。EDIT_FZF 设成 ENV_OFF 那套（'' / 0 / false / f / off /
+    no / n / never，大小写不敏感）就显式关掉 —— 和 EDIT_DEBUG 同一个判据（env_flag），
+    所以 `EDIT_FZF=OFF` 这种大写也认（以前只认小写的 'off'）。
+    注意 '' 也算关：和 EDIT_DEBUG 保持一致（要"用 fzf"就别设它）。
     不写 doctest：它看的是当前终端和 PATH。
     """
 
-    if os.environ.get(EDIT_FZF, '') in ('0', 'off', 'never'):
-        return False
+    if EDIT_FZF in os.environ and not env_flag(EDIT_FZF):
+        return False                    # 显式关；env_flag 对"没设"也返回 False，所以先判有没设
 
     return sys.stdin.isatty() and bool(shutil.which('fzf'))
 
@@ -1929,8 +1933,10 @@ def print_usage():
 
     print(__doc__)
 
-# env_flag() 认的"关"：置空、假、关闭、否（大小写由 env_flag 统一折成小写）
-ENV_OFF = ('', '0', 'false', 'f', 'off', 'no', 'n')
+# env_flag() 认的"关"：置空、假、关闭、否、never（大小写由 env_flag 统一折成小写）。
+# EDIT_DEBUG / EDIT_FZF 共用这一套；'never' 是 EDIT_FZF 那边的老写法（--color=never 那种），
+# 顺手让 EDIT_DEBUG=never 也成立 —— 没人这么写，只是同一套判据里多一个词
+ENV_OFF = ('', '0', 'false', 'f', 'off', 'no', 'n', 'never')
 
 def env_flag(name):
     """环境变量开关：ENV_OFF 里那几个都算关（大小写不敏感），其余非空算开
