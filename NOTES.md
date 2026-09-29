@@ -123,6 +123,21 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 且回退到 CLI 时它继承的也是同一个 hook（不用先 `--init` 导入）。
 只保证**打开**，不保证那个窗口被置前（见下"打开 ≠ 激活"）。
 
+**没有 hook 时**还有两条路，都不需要 stdin：
+
+- `--first`：取候选的第一个直连（`pick_first()`）。候选已按创建时间倒序，所以就是
+  **最新的那个窗口** —— 等效于 `--interactive` 敲 1，但能写进脚本；一个候选都没有
+  就报错退出（明确，好过悄悄回退去开 vim）。
+- 不显式要就照旧交回 CLI。但如果选中的是 **remote-cli**（用现成的
+  `have_remote_cli()` 判目录结构），那它**必定拒绝** —— 它只认 IDE 集成终端，原话是
+  `Command is only available in WSL or inside a Visual Studio Code terminal.`，
+  看不出该干什么。所以这种时候 `hint_remote_cli()` 换成能照做的提示（缺 hook、
+  hook 指向的 socket 已不通，两种原因分开说，并报一下有几个窗口可挑）。
+  **只在 remote-cli 这条路上打**：vim / `$EDITOR` 场景（比如 `git commit`）一个字不多打。
+  这条容易踩：`sudo` / `su` / `env -i` / 从别处起的 tmux 里 PATH 可能仍带着
+  `<安装目录>/bin/remote-cli`，`find_path_cli()` 按产品名会撞上它（`find_remote_cli()`
+  有 hook 门控、会跳过，绕过门控的就是它）。
+
 挑窗口这一步，装了 fzf 且 stdin 是 tty 就交给 fzf（`use_fzf()`）：
 
 - 候选行（就是 `--list` 那张表）喂 fzf 的 stdin，`--header-lines=1` 把表头固定住；

@@ -915,11 +915,12 @@ class ProcCase(EditCase):
         with patch.object(edit, 'PROC', self.proc):
             return edit.find_sockets()
 
-    def run_main(self, *argv, hook=None, answer=None):
+    def run_main(self, *argv, hook=None, answer=None, extra_env=None):
         """进程内跑 main：返回 (stdout, stderr, 退出码)
 
         SystemExit 在这里接住（--init 报错、--interactive 取消都走它），
         否则测试只能靠 subprocess 才能看到退出码。
+        extra_env 用来补几个变量（如 EDIT_CLI），其余照旧继承当前环境。
         """
 
         out, err = StringIO(), StringIO()
@@ -927,6 +928,7 @@ class ProcCase(EditCase):
         env.pop(edit.IPC_HOOK, None)
         # 关掉 fzf：测试不该真拉起一个选择器（要测它的话自己打 use_fzf 的补丁）
         env[edit.EDIT_FZF] = self.fzf
+        env.update(extra_env or {})
 
         if hook is not None:
             env[edit.IPC_HOOK] = hook
@@ -1436,6 +1438,68 @@ class InteractiveOpenTest(ProcCase):
         _, _, code = self.run_main('--interactive', '--list', self.a)
 
         self.assertIn('冲突', code)
+
+
+class NoHookTest(ProcCase):
+    """没有 hook 时的两条路：--first 取最新那个窗口；remote-cli 那条给能照做的提示"""
+
+    def make_sock(self, path, when):
+        """造一个真 socket 文件，并把它 mtime 设成 when（排序看它）"""
+
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        s.close()
+        os.utime(path, (when, when))
+
+    def test_first_takes_newest(self):
+        """--first：没 hook 也直连窗口，不用 stdin —— 取的是最新的那个（sock2）"""
+
+        self.make_sock(self.sock1, 1_600_000_000)    # 2020-09
+        self.make_sock(self.sock2, 1_700_000_000)    # 2023-11
+
+        out, err, code = self.run_main('--first', '--dry-run', self.a)
+
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith('socket ' + self.sock2 + ' '), out)
+
+    def test_first_without_windows(self):
+        """--first 但一个窗口都没有：报错退出，别悄悄回退去开 vim"""
+
+        self.proc = make_proc(os.path.join(self.dir, 'alt'), [])    # run_main 会用它
+
+        out, err, code = self.run_main('--first', '--dry-run', self.a)
+
+        self.assertIn('没有可用的窗口', str(code))
+
+    def test_hint_for_remote_cli_without_hook(self):
+        """选中 remote-cli 又没 hook：换成能照做的提示（CLI 自己那句看不出该干什么）"""
+
+        cli = os.path.join(self.dir, 'bin', 'remote-cli', 'buddycn')
+        os.makedirs(os.path.dirname(cli))
+
+        # have_remote_cli 认的结构：目录叫 remote-cli + 上两级的 node 可执行
+        for path in (cli, os.path.join(self.dir, 'node')):
+            with open(path, 'w'):
+                pass
+            os.chmod(path, 0o755)
+
+        out, err, code = self.run_main('--dry-run', self.a, extra_env={edit.EDIT_CLI: cli})
+
+        self.assertEqual(code, 0)
+        self.assertIn(cli, out)                     # --dry-run 照旧打印要跑的命令
+        self.assertIn('remote-cli 只认 IDE 集成终端', err)
+        self.assertIn('edit --interactive', err)
+        self.assertIn('2 个候选 socket', err)        # 假 /proc 里 sock1 / sock2
+
+    def test_no_hint_for_plain_cli(self):
+        """交回 vim / $EDITOR 那条路一个字都不多打（git commit 的 stderr 不能被污染）"""
+
+        out, err, code = self.run_main('--dry-run', self.a,
+                                       extra_env={edit.EDIT_CLI: self.fake_cli})
+
+        self.assertEqual(code, 0)
+        self.assertNotIn('remote-cli', err)
+        self.assertNotIn('--interactive', err)
 
 
 class FzfTest(ProcCase):

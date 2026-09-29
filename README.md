@@ -26,6 +26,8 @@ EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有
 edit --list                  列出存活的 IDE 窗口（最新的排最前；每行带 socket 创建时间，
                              用来区分同一窗口的多个 socket；只读、不读 stdin，会问各
                              窗口 workspace）
+edit --first <文件>          没有 hook 时也开在窗口里：取 --list 的第一个（最新那个），
+                             不提问、不读 stdin（脚本里能用；要自己挑用 --interactive）
 edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；逐条打印
                              创建时间与路径，--dry-run 只看不删）
 edit --usage                 打印完整用法（--help 是透传给 IDE CLI 的）

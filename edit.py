@@ -13,6 +13,8 @@
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
   edit --list                  列出存活的 IDE 窗口（最新的排最前；只读、不读 stdin，
                                会问各窗口 workspace）
+  edit --first <文件>          没有 hook 时也开在窗口里：取 --list 的第一个（也就是最新的
+                               那个），不提问、不读 stdin（要自己挑用 --interactive）
   edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；
                                只删 $XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录里的，
                                挨个打印它的创建时间和路径；--dry-run 只看不删）
@@ -225,6 +227,32 @@ def have_remote_cli(d):
 
     return (os.path.basename(d) == 'remote-cli' and
             os.access(os.path.join(d, os.pardir, os.pardir, 'node'), os.X_OK))
+
+
+def hint_remote_cli(why: str) -> str:
+    """选中的 CLI 是 remote-cli、又直连不上时，给一句能照做的提示（写 stderr）
+
+    remote-cli 是 server 侧的代理，只认 IDE 集成终端；缺 hook（或在别处丢了 hook）时
+    它必定拒绝，原话是 "Command is only available in WSL or inside a Visual Studio
+    Code terminal." —— 那句话看不出该做什么，这里补上两条出路。
+
+    窗口数顺手报一下：find_sockets() 只读 /proc，几毫秒，而且只在真要报错时算。
+    """
+    socks = find_sockets()
+
+    lines = ['edit: %s；remote-cli 只认 IDE 集成终端，它会直接拒绝：' % why,
+             '      Command is only available in WSL or inside a Visual Studio Code terminal.']
+
+    if socks:
+        lines.append('      这里有 %d 个候选 socket（edit --list 看它们属于哪个窗口）：'
+                     % len(socks))
+        lines.append('      edit --interactive <文件> 挑一个，'
+                     '或 eval "$(edit --init bash)" 把 hook 装进 shell')
+    else:
+        lines.append('      也没找到存活的窗口：在 IDE 的集成终端里跑，'
+                     '或先 eval "$(edit --init bash)" 把 hook 装进 shell')
+
+    return '\n'.join(lines) + '\n'
 
 def find_remote_cli():
     """从 PATH 里找 server 端的 remote-cli：<安装目录>/bin/remote-cli/<产品>
@@ -1594,6 +1622,16 @@ def load_sockets(tag):
 
     return socks
 
+def pick_first():
+    """--first：取候选里的第一个（等于 --interactive 敲 1，但不需要 stdin）
+
+    给"没 hook 但就想开在窗口里"用，脚本里尤其方便。返回 socket 路径；没有候选
+    （或这里根本没有 /proc）返回 None，调用方自己决定怎么报错。
+    """
+    socks = find_sockets()
+
+    return socks[0]['sock'] if socks else None
+
 def print_sockets():
     socks = load_sockets('edit --list')
 
@@ -1907,6 +1945,7 @@ def build_args():
 
     parser.add_argument('--init', choices=['fish', 'bash'])
     parser.add_argument('--list', action='store_true')
+    parser.add_argument('--first', action='store_true')
     parser.add_argument('--prune', action='store_true')
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
@@ -2029,9 +2068,20 @@ def main():
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
     # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
+    why_cli = None                      # 交回 CLI 的原因（只在 remote-cli 那条路上要用）
+
+    if not sock and flags.first:
+        # --first：没 hook 时也开在窗口里 —— 取候选的第一个（等于 --interactive 敲 1，
+        # 但不用 stdin，脚本里能用）。直连比交回 remote-cli 强，后者只认集成终端。
+        sock = pick_first()
+
+        if not sock:
+            sys.exit('edit --first: 没有可用的窗口（桌面版 CLI 自己会复用当前窗口，'
+                     '直接 edit <文件> 即可）')
 
     if not sock:
         # 不在 IDE 终端里本来就该走 CLI，记一条好回答"为什么这次没直连"
+        why_cli = '没有 %s' % IPC_HOOK
         logger.debug('no %s, falling back to cli', IPC_HOOK)
 
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
@@ -2058,6 +2108,7 @@ def main():
             return
 
         sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
+        why_cli = 'socket 打不开（%s）' % detail
 
     # 走到这儿是要交回 CLI 了：它自己会造 marker，我们这个得收回去
     remove_marker(marker)
@@ -2065,6 +2116,12 @@ def main():
     cli = find_cli()
     if not cli:
         sys.exit('找不到 cli（%s）' % ' / '.join(CODE_LIKE + VIM_LIKE))
+
+    # remote-cli 只认 IDE 集成终端：没有可用的 hook 时它必定拒绝（原话就是下一行那句
+    # "Command is only available in WSL or inside a Visual Studio Code terminal."）。
+    # 换成能照做的提示 —— 只在 remote-cli 这条路上打，vim / $EDITOR 场景一个字不多打
+    if why_cli and have_remote_cli(os.path.dirname(cli[0])):
+        sys.stderr.write(hint_remote_cli(why_cli))
 
     # cli 是 argv 列表：[可执行文件, 自己配置里的参数...]（如 EDITOR='vim -u NONE'）
     kind = cli_kind(cli[0])
