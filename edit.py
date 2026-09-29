@@ -11,7 +11,8 @@
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
   EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
-  edit --list                  列出存活的 IDE 窗口（只读、不读 stdin，会问各窗口 workspace）
+  edit --list                  列出存活的 IDE 窗口（最新的排最前；只读、不读 stdin，
+                               会问各窗口 workspace）
   edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；
                                只删 $XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录里的，
                                挨个打印它的创建时间和路径；--dry-run 只看不删）
@@ -546,7 +547,17 @@ def find_sockets():
 
     只对 server 端有意义：桌面版（macOS 的 code / buddycn / trae-cn）根本不产生
     这种 socket，CLI 自己会复用当前窗口，没有窗口可挑。
-    返回 [{'sock','pid','install','cli'}]；没有 /proc（macOS）时返回 None。
+
+    返回 [{'sock','pid','install','cli'}]，按 socket 文件的创建时间（sock_mtime）
+    **倒序**：新的排最前 —— 同一窗口会同时挂着好几个 socket，最新的那个才是当前
+    会话；读不到时间的（文件已被删 / 无权限）当最旧沉到最后，但一个都不丢（--list
+    里它的时间列显示 ?）。
+
+    顺序必须确定：/proc 的枚举顺序不稳，而 --list 的 # 和 --interactive 的编号都是
+    靠位置认的。同一时间（同一 tick 内 bind，mtime 会完全相同）退回路径序 —— 先按
+    路径排一遍再稳定地按时间排，所以结果与遍历顺序无关。
+
+    没有 /proc（macOS）时返回 None。
     """
 
     ino2sock = unix_bind_paths()
@@ -604,7 +615,19 @@ def find_sockets():
                 'cli': cli or '',
             }
 
-    return [found[i] for i in sorted(found)]
+    def created(sock: dict[str, str]) -> float:
+        """排序键：读不到创建时间的当最旧（-inf），倒序时正好沉到最后
+
+        不用 `sock_mtime(...) or -inf`：mtime 可能合法地是 0.0，那是假值。
+        """
+        at = sock_mtime(sock['sock'])
+
+        return float('-inf') if at is None else at
+
+    socks = sorted(found.values(), key=lambda s: s['sock'])   # 先按路径定序（同时间兜底）
+    socks.sort(key=created, reverse=True)                     # 再倒序；sort 稳定
+
+    return socks
 
 def http_body(raw):
     """HTTP 回复 -> 正文；只处理 chunked（socket 上的回复都是这种）
@@ -1440,19 +1463,33 @@ def fmt_time(ts: float) -> str:
     return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
 
 
+def sock_mtime(path: str) -> float | None:
+    """socket 文件的创建（bind）时间；stat 不到（已被删 / 无权限）返回 None
+
+    用 mtime 的理由见 prune_sockets：Linux 拿不到 st_birthtime，而 socket 文件 bind
+    之后没人再写它。展示（sock_created）与排序（find_sockets）共用这一处 stat ——
+    两边取同一个值，--list 的时间列才会和行序一致。
+
+    >>> sock_mtime('/no-such-file.sock') is None
+    True
+    """
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
 def sock_created(path: str) -> str:
     """socket 文件的创建（bind）时间；stat 不到就 '?'
 
-    用 mtime 的理由见 prune_sockets：Linux 拿不到 st_birthtime，而 socket 文件 bind
-    之后没人再写它。--list 里路径可能刚被删（窗口退了），那就显示 ?。
+    --list 里路径可能刚被删（窗口退了），那就显示 ?。
 
     >>> sock_created('/no-such-file.sock')
     '?'
     """
-    try:
-        return fmt_time(os.stat(path).st_mtime)
-    except OSError:
-        return '?'
+    at = sock_mtime(path)
+
+    return '?' if at is None else fmt_time(at)
 
 
 def format_sockets(socks, hook):
@@ -1463,6 +1500,8 @@ def format_sockets(socks, hook):
 
     time 列是 socket 文件的创建（bind）时间（见 sock_created）—— 同一个窗口会同时挂着
     好几个 socket，靠它区分谁新谁旧；文件不在了就是 ?。
+    这里只按传进来的顺序渲染（编号 = 位置），排序是 find_sockets 的事：按时间倒序，
+    所以 # 号越小越新。
 
     >>> s = [{'sock': '/r/vscode-ipc-a.sock', 'pid': '1',
     ...       'cli': '/i/bin/remote-cli/buddycn', 'workspace': '/w/proj'}]

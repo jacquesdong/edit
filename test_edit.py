@@ -885,6 +885,30 @@ class ProcCase(EditCase):
         self.proc = make_proc(self.dir, [(self.sock1, '101', self.install),
                                          (self.sock2, '202', self.install)])
 
+    def bind_at(self, path, when):
+        """在 path 上 bind 一个"绑过就走"的 socket 文件，并把创建时间定成 when
+
+        find_sockets 认窗口只看假 /proc，这些文件是为 mtime 存在的（排序用）。
+        """
+
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(path)
+        s.close()
+        os.utime(path, (when, when))
+
+    def pin_created(self):
+        """把两个假 socket 的创建时间钉死：sock1 更新 -> 编号 1 / 2 与命名一致
+
+        候选按创建时间倒序（见 find_sockets），而两次 bind 往往落在同一个时钟 tick
+        上、mtime 完全相同 —— 不钉住就退回路径序，断言会跟着时钟粒度飘。
+        还没 bind 的那个（文件不存在）跳过，它会沉到最后。
+        """
+
+        for path, when in ((self.sock1, 1_700_000_000),     # 2023-11
+                           (self.sock2, 1_600_000_000)):    # 2020-09
+            if os.path.exists(path):
+                os.utime(path, (when, when))
+
     def candidates(self):
         """用假 /proc 跑一次 find_sockets"""
 
@@ -925,7 +949,7 @@ class ProcCase(EditCase):
 
 
 class FindSocketsTest(ProcCase):
-    """find_sockets：认 socket、推出安装目录与 CLI"""
+    """find_sockets：认 socket、推出安装目录与 CLI、按创建时间倒序"""
 
     def test_lists_windows(self):
         found = self.candidates()
@@ -962,6 +986,32 @@ class FindSocketsTest(ProcCase):
 
         with patch.object(edit, 'PROC', empty):
             self.assertIsNone(edit.find_sockets())
+
+    def test_newest_first(self):
+        """按创建时间倒序：新的排最前，跟路径名无关"""
+
+        self.bind_at(self.sock1, 1_600_000_000)             # 2020-09
+        self.bind_at(self.sock2, 1_700_000_000)             # 2023-11
+
+        self.assertEqual([s['sock'] for s in self.candidates()],
+                         [self.sock2, self.sock1])
+
+    def test_same_created_keeps_path_order(self):
+        """创建时间一样（同一个时钟 tick 里 bind）退回路径序：顺序仍然确定"""
+
+        self.bind_at(self.sock1, 1_700_000_000)
+        self.bind_at(self.sock2, 1_700_000_000)
+
+        self.assertEqual([s['sock'] for s in self.candidates()],
+                         [self.sock1, self.sock2])
+
+    def test_unknown_created_sinks_but_is_kept(self):
+        """读不到创建时间（文件不在了）的沉到最后，但不丢：--list 里显示 ?"""
+
+        self.bind_at(self.sock1, 1_700_000_000)             # sock2 没有文件
+
+        self.assertEqual([s['sock'] for s in self.candidates()],
+                         [self.sock1, self.sock2])
 
 
 class PruneTest(ProcCase):
@@ -1101,6 +1151,7 @@ class ProbeTest(ProcCase):
     def test_fills_workspace(self):
         self.add_window(path=self.sock1, body=status_body('/w/proj'))
         self.add_window(path=self.sock2, body=status_body('/w/other'))
+        self.pin_created()                              # 断言按编号写，顺序得钉住
 
         socks = self.candidates()
         edit.probe_workspaces(socks)
@@ -1301,21 +1352,22 @@ class ListTest(ProcCase):
         self.assertIn('不接受文件参数', code)
 
     def test_shows_creation_time(self):
-        """time 列 = socket 文件的创建（bind）时间；文件不在了才显示 ?"""
+        """time 列 = socket 文件的创建（bind）时间，行序也按它倒序（新的在前）
 
-        for path, when in ((self.sock1, 1_600_000_000),      # 2020-09
-                           (self.sock2, 1_700_000_000)):      # 2023-11
-            s = socket.socket(socket.AF_UNIX)
-            s.bind(path)
-            s.close()
-            os.utime(path, (when, when))
+        文件不在了的那行显示 ?，见 test_list（sock2 没人监听）。
+        """
+
+        self.bind_at(self.sock1, 1_600_000_000)             # 2020-09
+        self.bind_at(self.sock2, 1_700_000_000)             # 2023-11
 
         out, _, _ = self.run_main('--list')
 
         rows = out.strip().split('\n')
 
-        self.assertTrue(rows[1].startswith('   1  2020-'), rows[1])
-        self.assertTrue(rows[2].startswith('   2  2023-'), rows[2])
+        self.assertTrue(rows[1].startswith('   1  2023-'), rows[1])
+        self.assertIn(self.sock2, rows[1])
+        self.assertTrue(rows[2].startswith('   2  2020-'), rows[2])
+        self.assertIn(self.sock1, rows[2])
 
 
 class InteractiveOpenTest(ProcCase):
@@ -1325,6 +1377,7 @@ class InteractiveOpenTest(ProcCase):
         super().setUp()
         self.w1 = self.add_window(path=self.sock1, body=status_body('/w/proj'))
         self.w2 = self.add_window(path=self.sock2, body=status_body('/w/other'))
+        self.pin_created()                              # 1 号 = sock1，断言才不飘
 
     def opens(self, win):
         """该窗口收到的 open 报文（探测 workspace 的 status 不算）"""
@@ -1392,6 +1445,7 @@ class FzfTest(ProcCase):
         super().setUp()
         self.w1 = self.add_window(path=self.sock1, body=status_body('/w/proj'))
         self.w2 = self.add_window(path=self.sock2, body=status_body('/w/other'))
+        self.pin_created()                              # 行序 = 编号 = 1 号 sock1
 
     def opens(self, win):
         return [m for m in win.requests if m.get('type') == 'open']
@@ -1509,6 +1563,7 @@ class InitTest(ProcCase):
     def test_interactive_picks_window(self):
         self.add_window(path=self.sock1, body=status_body('/w/proj'))
         self.add_window(path=self.sock2, body=status_body('/w/other'))
+        self.pin_created()                              # 2 号 = sock2，断言才不飘
 
         out, err, code = self.run_main('--init', 'bash', '--interactive', answer='2')
 

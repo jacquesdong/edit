@@ -23,8 +23,9 @@ edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
 eval "$(edit --init bash)"   同上（bash / sh / dash）
 
 EDIT_CLI=buddycn edit <文件>  点名用哪个 CLI（多个 IDE 都装着时有用，优先级最高）
-edit --list                  列出存活的 IDE 窗口（每行带 socket 创建时间，方便区分同一
-                             窗口的多个 socket；只读、不读 stdin，会问各窗口 workspace）
+edit --list                  列出存活的 IDE 窗口（最新的排最前；每行带 socket 创建时间，
+                             用来区分同一窗口的多个 socket；只读、不读 stdin，会问各
+                             窗口 workspace）
 edit --prune                 清掉死掉的 vscode-ipc socket（没人 bind 的那些；逐条打印
                              创建时间与路径，--dry-run 只看不删）
 edit --usage                 打印完整用法（--help 是透传给 IDE CLI 的）
