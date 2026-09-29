@@ -1849,13 +1849,33 @@ def use_fzf():
     return sys.stdin.isatty() and bool(shutil.which('fzf'))
 
 
+# fzf 被 Esc / Ctrl-C 中断时的退出码（0.67.0 用 pty 实测：Esc 与 Ctrl-C 都是 130；
+# 对照：fzf 自己报错是 2，找不到 fzf 是 127 / 拉不起来是 OSError）。靠它把
+# "用户明确取消"和"这条路不通"分开 —— 两者的收场相反，见下面的 FZF_CANCELLED。
+FZF_CANCEL_CODE = 130
+
+# fzf_pick 的"用户取消"返回值：按身份比较（is），与"用不了 / 认不出"的 None 分开。
+# 取消 = 直接退出；用不了 = 回退编号输入（见 ask_socket）。
+FZF_CANCELLED = object()
+
+# --interactive 取消时的收场语：fzf 里按 Esc 和编号输入按 q 是同一种意图（都没选中
+# 窗口），共用这一句 + 同一个退出码，不写成两句不同的话。
+NO_WINDOW_PICKED = 'edit --interactive: 没有选中窗口'
+
+
 def fzf_pick(socks):
-    """用 fzf 挑一个窗口：返回候选项；没选中 / 认不出 / 拉不起来就返回 None
+    """用 fzf 挑一个窗口：返回候选项；取消返回 FZF_CANCELLED；认不出 / 拉不起来返回 None
 
     候选行喂给 fzf 的 stdin，它的 UI 走自己的 stderr（继承终端）—— 我们的
     stdout 要留给 --init 的初始化片段，不能让选择器写进来；选中项从 fzf 的
-    stdout 读。没选中（Esc / Ctrl-C）和拉不起来都返回 None，由 ask_socket
-    落到编号输入那条路。
+    stdout 读。
+
+    三种结局分开，别合并成一种：
+      * Esc / Ctrl-C（退出码 FZF_CANCEL_CODE）是用户明确要取消 —— Esc 在哪儿都是
+        "退出"，再弹一个编号提示等于让取消失效，所以返回 FZF_CANCELLED 直接退出；
+      * 拉不起来（OSError）/ 别的退出码（fzf 报错等）是"这条路不通"，返回 None 由
+        ask_socket 落到编号输入 —— 和没装 fzf 时行为一致；
+      * 选中的行认不出编号：那是 fzf 给的行不是我们要的，不代表用户取消，也回退。
     """
 
     lines = format_sockets(socks, current_socket())
@@ -1873,7 +1893,11 @@ def fzf_pick(socks):
     except (OSError, subprocess.SubprocessError):
         return None
 
+    if proc.returncode == FZF_CANCEL_CODE:
+        return FZF_CANCELLED                # Esc / Ctrl-C：用户明确取消，不是故障
+
     if proc.returncode != 0:
+        logger.debug('fzf exited %d, falling back to number input', proc.returncode)
         return None
 
     n = socket_number(proc.stdout)
@@ -1896,13 +1920,16 @@ def ask_socket(socks):
     写回环境，之后打开文件就走那个窗口。
 
     有 fzf 时先用它（use_fzf()）：它的 UI 走 stderr，不碰留给片段的 stdout。
-    它没选中就落回下面这套编号输入 —— 所以两种挑法的行为是一致的。
+    在 fzf 里 Esc / Ctrl-C 就是取消 —— 和下面按 q 一样的收场，不再问一遍；
+    只有"拉不起来 / 出错 / 认出的行没编号"才落回编号输入。
     """
 
     current = current_socket()
 
     if use_fzf():
         picked = fzf_pick(socks)
+        if picked is FZF_CANCELLED:
+            sys.exit(NO_WINDOW_PICKED)      # Esc / Ctrl-C：Esc 到哪都是"退出"，别再问一遍
         if picked:
             return picked
 
@@ -1921,7 +1948,7 @@ def ask_socket(socks):
 
     chosen = pick_socket(socks, answer, current)
     if not chosen:
-        sys.exit('edit --interactive: 没有选中窗口')
+        sys.exit(NO_WINDOW_PICKED)
 
     return chosen
 

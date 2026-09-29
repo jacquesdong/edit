@@ -143,11 +143,24 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
 - 候选行（就是 `--list` 那张表）喂 fzf 的 stdin，`--header-lines=1` 把表头固定住；
 - 它的界面走它自己的 stderr（继承终端），**我们的 stdout 留给初始化片段**，
   选中项从它的 stdout 读回来，按行首编号反查候选项（`socket_number()`）；
-- 没选中（Esc / Ctrl-C）、认不出行、拉不起来：一律落回"列编号 + 读一行"那套，
-  行为和不装 fzf 时一模一样；
+- **Esc / Ctrl-C 是取消，不是"没选中"**：fzf 被中断时退出码是 130（0.67.0 在 pty
+  里实测，Esc 与 Ctrl-C 都是 130；fzf 自己报错是 2、找不到是 127 / OSError），
+  所以按 `FZF_CANCEL_CODE` 认出来，`fzf_pick()` 返回 `FZF_CANCELLED`（身份比较的
+  哨兵），`ask_socket()` 直接退出 —— 收场语就是编号路径按 q 的那句
+  `NO_WINDOW_PICKED`，不再弹一遍编号提示（早先这里和"用不了"合并成一支，于是按
+  Esc 反而会多问一次，得按两次才退）；
+- 剩下三种才算"这条路不通"，落回"列编号 + 读一行"那套，行为和不装 fzf 时一模一样：
+  拉不起来（OSError）、别的退出码（fzf 报错等）、选中的行认不出编号（那是它给的行
+  不是我们要的，不代表用户取消）；
 - `EDIT_FZF` 设成 `ENV_OFF` 那套（空 / 0 / false / f / off / no / n / never，大小写
   不敏感）就显式关 —— 和 `EDIT_DEBUG` 共用 `env_flag()`，不各写一套；测试里必须关
   （否则会真拉起一个选择器）。
+- **怎么验这三种结局**：真 fzf 的 TUI 在 pty 里**收不到按键**（`Esc` 没反应，发个 `x`
+  也改不动它的查询行；查过不是没开 raw，也不是 /dev/tty 指错 —— 同一台机器上同样方式
+  起裸 fzf 反而收得到），别拿它当"Esc 没生效"的证据。端到端要验就换成**放在 PATH 前面
+  的假 fzf 可执行文件**（`exit 130` / `exit 2` / `echo "2 x"`），走真 CLI + 真 tty 跑
+  `edit --init bash --interactive` —— 三种结局都能复现；单测里则是把 `subprocess.run`
+  换成假的（`FzfTest`）。
 
 ### 命令行只扫一次：normalize + 两个后端
 

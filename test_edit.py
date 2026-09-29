@@ -1515,7 +1515,7 @@ class FzfTest(ProcCase):
         return [m for m in win.requests if m.get('type') == 'open']
 
     def run_fzf(self, out, code=0, answer='1'):
-        """假 fzf 返回 out（code != 0 = 被取消），返回它收到的参数"""
+        """假 fzf 返回 out（code=130 = Esc / Ctrl-C 取消，别的非 0 = fzf 出错）"""
 
         seen = {}
 
@@ -1544,15 +1544,40 @@ class FzfTest(ProcCase):
         self.assertEqual(self.opens(self.w1), [], '1 号不该被打开')
         self.assertEqual(self.opens(self.w2)[-1]['fileURIs'], ['file://' + self.a])
 
-    def test_cancel_falls_back(self):
-        """Esc / Ctrl-C（fzf 非 0 退出）-> 落到编号输入，不直接退出"""
+    def test_cancel_exits(self):
+        """Esc / Ctrl-C（fzf 退出码 130）就是取消：直接退出，不再问一遍"""
 
         self.run_fzf('', code=130, answer='1')
+
+        self.assertIn('没有选中窗口', self.code)            # 和编号输入按 q 同一句收场
+        self.assertNotIn('选择窗口编号', self.err)          # 没落回编号输入
+        self.assertEqual(self.opens(self.w1), [])
+        self.assertEqual(self.opens(self.w2), [])
+
+    def test_spawn_failure_falls_back(self):
+        """fzf 拉不起来（OSError）-> 仍落回编号输入，行为和不装 fzf 时一致"""
+
+        def boom(argv, **kw):
+            raise FileNotFoundError(2, 'No such file or directory', 'fzf')
+
+        with patch.object(edit, 'use_fzf', lambda: True), \
+                patch('subprocess.run', boom):
+            self.out, self.err, self.code = self.run_main('--interactive', self.a,
+                                                          answer='1')
 
         self.assertEqual(self.code, 0)
         self.assertIn('选择窗口编号', self.err)
         self.assertEqual(self.opens(self.w1)[-1]['fileURIs'], ['file://' + self.a])
         self.assertEqual(self.opens(self.w2), [])
+
+    def test_error_falls_back(self):
+        """fzf 自己报错（非 0，也不是 130）-> 同样落回编号输入"""
+
+        self.run_fzf('', code=2, answer='2')
+
+        self.assertIn('选择窗口编号', self.err)
+        self.assertEqual(self.opens(self.w1), [])
+        self.assertEqual(self.opens(self.w2)[-1]['fileURIs'], ['file://' + self.a])
 
     def test_unparsable_line_falls_back(self):
         """选中的行认不出编号 -> 同样落到编号输入"""
