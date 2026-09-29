@@ -1820,8 +1820,12 @@ def fzf_pick(socks):
 
     try:
         # --header-lines=1：表头那行固定住，不参与过滤
+        # --tiebreak=index：默认的 length 判据是"忽略前导空白"量长度的，于是带 * 的
+        #   那行（当前窗口）会被当成更长、排到最后；换成 index 后同分就按输入顺序
+        #   （也就是 --list 的顺序，最新在前），得分排序本身不受影响
         proc = subprocess.run(['fzf', '--prompt=窗口> ', '--height=40%',
-                               '--layout=reverse', '--header-lines=1'],
+                               '--layout=reverse', '--header-lines=1',
+                               '--tiebreak=index'],
                               input='\n'.join(lines) + '\n',
                               stdout=subprocess.PIPE, text=True)
     except (OSError, subprocess.SubprocessError):
