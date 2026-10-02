@@ -31,9 +31,10 @@
                                --list 看 stdout、提示与日志看 stderr，各判各的；
                                省略取值=always（强制，如 edit --list --color=always
                                | less -R）。EDIT_COLOR 认同样的三个值（edit 被当
-                               $EDITOR 调起时用）。注意裸 --color 后面不能直接跟
-                               文件：argparse 会把文件名当它的取值，那种写法要
-                               写成 edit --color=always <文件>
+                               $EDITOR 调起时用）；auto 下还认 FORCE_COLOR（非空且
+                               不是 0/false 就强制上色）。注意裸 --color 后面不能
+                               直接跟文件：argparse 会把文件名当它的取值，那种写法
+                               要写成 edit --color=always <文件>
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                    （普通终端里没有 hook 时用这个）
@@ -203,18 +204,22 @@ class LevelMark(logging.Filter):
 def should_color(mode, stream):
     """--color 的三态落成"这条流上不上色"
 
-    auto 才看终端，而且只看**这条流**：`edit --list > f` 时 stdout 不是终端，就不该
+    auto 才看环境，而且只看**这条流**：`edit --list > f` 时 stdout 不是终端，就不该
     把转义写进 f；同一时刻 stderr 可能还是终端，那边照旧上色。
-    还有两条通用约定：TERM=dumb（终端自称不支持）与 NO_COLOR（规范是"设了且非空"）
-    都不上色。
+    三条通用约定（与 fixcomm-py 751178a 同一套）：
+      * FORCE_COLOR 非空且不是 0 / false —— 强制上色，压过下面全部；
+        `0` / `false` 只表示"不强制"（等同没设），不是"强制关闭"，关闭请用 NO_COLOR
+      * TERM=dumb（终端自称不支持）或压根没设 —— 不上色
+      * NO_COLOR 设了且非空 —— 不上色（规范如此，空串不算）
 
     >>> import io
     >>> should_color('never', sys.stdout)      # 不管是不是终端
     False
     >>> should_color('always', io.StringIO())
     True
-    >>> should_color('auto', io.StringIO())    # 不是终端 -> auto 下不上色
-    False
+
+    auto 那几条要靠环境变量，doctest 里改真环境会漏出去，由 test_edit.py 的
+    ColorTest 覆盖（那边能 patch.dict）。
     """
 
     if mode == COLOR_ALWAYS:
@@ -222,6 +227,10 @@ def should_color(mode, stream):
 
     if mode == COLOR_NEVER:
         return False
+
+    force = os.environ.get('FORCE_COLOR', '')
+    if force and force.lower() not in ('0', 'false'):
+        return True                      # 显式强制：压过 isatty / TERM / NO_COLOR
 
     return (stream.isatty() and
             os.environ.get('TERM', 'dumb') != 'dumb' and

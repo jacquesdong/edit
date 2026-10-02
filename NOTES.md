@@ -551,12 +551,23 @@ IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，�
 | `--color=never` | 关闭 |
 
 默认取 `auto` 而不是 `never`（和 ls / grep 那派一致），并且"默认值"与"裸取值"必须
-成对 —— 否则裸用和不传完全等价、失去意义。判据三条：
+成对 —— 否则裸用和不传完全等价、失去意义。判定链（自上而下，只对 `auto` 生效；`--color=always|never` 是显式参数，永远最大）：
 
-```bash
-stream.isatty() and os.environ.get('TERM', 'dumb') != 'dumb' and not os.environ.get('NO_COLOR', '')
-```
+| 条件 | 结果 |
+| --- | --- |
+| `--color=always` / `never` | 直接定，不看环境 |
+| `FORCE_COLOR` 非空且不是 `0` / `false` | 上色（压过下面全部） |
+| `TERM` 未设置或等于 `dumb` | 不上色 |
+| `NO_COLOR` 设了且非空 | 不上色 |
+| 这条流不是 tty | 不上色 |
 
+后四条在代码里是一次合取（`isatty() and TERM… and not NO_COLOR…`），只有
+`FORCE_COLOR` 是独立的短路分支。和 `fixcomm-py` 的 `751178a` 同一套（那边先做的，
+这边照抄，免得两个仓库记两套判据）。
+
+- **`FORCE_COLOR=0` / `false` 只表示"不强制"**（等同没设），**不是"强制关闭"** ——
+  要关就用 `NO_COLOR` 或 `--color=never`。edit 这边的用处：`$EDITOR` 被 git 调起时
+  没有 tty，又不想改命令行，`FORCE_COLOR=1` 就能统一开。
 - **按"这条流"各判一次**：`--list` 写 stdout、提示与日志写 stderr。所以
   `edit --list > f` 时 stdout 不是终端就不上色（别把转义写进文件），而同一时刻
   stderr 可能仍是终端，那边照旧上色。

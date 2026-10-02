@@ -1882,6 +1882,24 @@ class ColorTest(ProcCase):
         self.assertFalse(self.wants('auto', env={'NO_COLOR': '1'}))
         self.assertTrue(self.wants('auto', env={'NO_COLOR': ''}))
 
+    def test_force_color(self):
+        """FORCE_COLOR：非空且不是 0/false 就上色，压过 isatty / TERM / NO_COLOR"""
+
+        self.assertTrue(self.wants('auto', tty=False, env={'FORCE_COLOR': '1'}))
+        self.assertTrue(self.wants('auto', env={'FORCE_COLOR': '1', 'NO_COLOR': '1'}))
+        self.assertTrue(self.wants('auto', env={'FORCE_COLOR': '1', 'TERM': 'dumb'}))
+
+    def test_force_color_zero_only_means_no_force(self):
+        """FORCE_COLOR=0 / false 只是"不强制"（等同没设），不是"强制关闭" """
+
+        self.assertFalse(self.wants('auto', tty=False, env={'FORCE_COLOR': '0'}))
+        self.assertTrue(self.wants('auto', tty=True, env={'FORCE_COLOR': 'false'}))
+
+    def test_explicit_beats_force_color(self):
+        """--color=never 仍是最大的：压过 FORCE_COLOR"""
+
+        self.assertFalse(self.wants('never', env={'FORCE_COLOR': '1'}))
+
     def test_env_color(self):
         """EDIT_COLOR 认三个取值（大小写不敏感），认不出的回落 auto"""
 
@@ -1973,6 +1991,16 @@ class ColorTest(ProcCase):
         self.add_window(path=self.sock1, body=status_body('/w/proj'))
 
         out, _, _ = self.run_main('--list', '--color=always', hook=self.sock1)
+
+        self.assertIn(edit.YELLOW + '*', out)
+
+    def test_list_forced_by_env(self):
+        """FORCE_COLOR=1：命令行没写 --color 也上色（edit 被当 $EDITOR 调起时用）"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, _, _ = self.run_main('--list', hook=self.sock1,
+                                  extra_env={'FORCE_COLOR': '1'})
 
         self.assertIn(edit.YELLOW + '*', out)
 

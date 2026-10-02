@@ -44,7 +44,9 @@ edit --color=always …            给输出上色（窗口表的表头、当前
                                  日志的时间戳与 <D>/<E>）；不传=auto：只在这条流是
                                  终端时上色，TERM=dumb 或设了 NO_COLOR 就不上色。
                                  --list 看 stdout、提示与日志看 stderr，各判各的。
-                                 EDIT_COLOR=never 等价（edit 被当 $EDITOR 调起时用）。
+                                 EDIT_COLOR=never 等价（edit 被当 $EDITOR 调起时用）；
+                                 auto 下还认 FORCE_COLOR（非空且不是 0/false 就强制
+                                 上色，压过 TERM=dumb / NO_COLOR / 不是终端）。
                                  裸 --color 后面不能直接跟文件（文件名会被当取值），
                                  那种写法要写 --color=always <文件>
 ```
