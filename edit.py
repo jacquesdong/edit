@@ -25,6 +25,15 @@
   edit --debug                 把吞掉的失败原因（socket 连不上 / 超时 / 被拒…）
                                打到 stderr；EDIT_DEBUG=1 等价，空 / 0 / false / f /
                                off / no / n / never 都算关（EDIT_FZF 同一套）
+  edit --color[=always|never]  给输出上色（窗口表的表头和当前窗口那颗 *、--debug
+                               日志的时间戳与 <D>/<E>）；不传=auto：只在这条流是终端
+                               时才上色，TERM=dumb 或设了 NO_COLOR 就不上色。
+                               --list 看 stdout、提示与日志看 stderr，各判各的；
+                               省略取值=always（强制，如 edit --list --color=always
+                               | less -R）。EDIT_COLOR 认同样的三个值（edit 被当
+                               $EDITOR 调起时用）。注意裸 --color 后面不能直接跟
+                               文件：argparse 会把文件名当它的取值，那种写法要
+                               写成 edit --color=always <文件>
 
   edit --init fish --interactive   列出窗口并挑一个，输出它的初始化片段
                                    （普通终端里没有 hook 时用这个）
@@ -124,8 +133,118 @@ logger = logging.getLogger(__name__)
 
 # 日志格式：LOG_FORMAT_DEBUG 就是常规格式再挂一段 [文件:行号 函数] —— 排查那几条被
 # 吞掉的失败时，最需要知道的正是"谁吞的"（file:line 也正好是终端里能点的形状）
-LOG_FORMAT = '%(asctime)s.%(msecs)03d <%(levelname).1s> %(message)s'
+LOG_FORMAT = '%(asctime)s.%(msecs)03d %(levelmark)s %(message)s'
 LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filename)s:%(lineno)d %(funcName)s]'
+
+# 着色版（--color 生效时才用）：时间戳与位置压暗、级别按"越严重越亮"上色、正文不着色。
+# levelmark 由下面的 LevelMark 注入（连尖括号一起上色），所以两个版本都写 %(levelmark)s。
+#
+# 配色移植自 fixcomm-py c3ebf44（那边对齐 logback 的 LOG_CONSOLE_PATTERN），几条判据：
+# - 时间戳/位置用 256 色灰 38;5;244：不用 faint（SGR 2）—— 它的实际灰度由终端主题决定，
+#   有的主题下几乎看不见、有的又和正文一样亮
+# - 级别阶梯 D 38;5;24 → I 38;5;65 → W 33 → E 31：不用 2;34 / 2;32，因为不少主题会
+#   忽略 dim，退化成饱和 ANSI 色反而更亮；做成阶梯后级别一眼可分，正文仍是最亮的一档
+# - 窗口表里当前窗口那颗 * 用亮黄：一行里唯一要跳出来的东西
+GRAY      = '\x1b[38;5;244m'
+DIM_BLUE  = '\x1b[38;5;24m'
+DIM_GREEN = '\x1b[38;5;65m'
+YELLOW    = '\x1b[33m'
+RED       = '\x1b[31m'
+RESET     = '\x1b[0m'
+
+LOG_FORMAT_COLOR = (GRAY + '%(asctime)s.%(msecs)03d' + RESET +
+                    ' %(levelmark)s %(message)s')
+LOG_FORMAT_COLOR_DEBUG = (LOG_FORMAT_COLOR + ' ' + GRAY +
+                          '[%(filename)s:%(lineno)d %(funcName)s]' + RESET)
+
+
+class LevelMark(logging.Filter):
+    """不做过滤，只往记录里注入 levelmark（形如 <D>），要上色时连尖括号一起上色
+
+    尖括号在这里产出而不是写在格式串里，整块 <D> 才能一起上色、不留一对亮括号。
+    不上色时也挂着它（color=False），于是两个格式串都用 %(levelmark)s，不必再分
+    "有没有装这个 filter" —— 少一处能漏的分支。
+
+    >>> r = logging.LogRecord('c', logging.WARNING, 'f', 1, 'm', None, None)
+    >>> LevelMark(False).filter(r) and r.levelmark
+    '<W>'
+    >>> LevelMark(True).filter(r) and r.levelmark
+    '\\x1b[33m<W>\\x1b[0m'
+    >>> LevelMark(True).filter(r)          # 不过滤：返回 True，记录照常往下走
+    True
+    """
+
+    COLORS = {
+        logging.DEBUG: DIM_BLUE,
+        logging.INFO: DIM_GREEN,
+        logging.WARNING: YELLOW,
+        logging.ERROR: RED,
+        logging.CRITICAL: '\x1b[1;31m',
+    }
+
+    def __init__(self, color: bool = False) -> None:
+        super().__init__()
+
+        self.color = color
+
+    def filter(self, record):
+        mark = '<{}>'.format(record.levelname[0])     # D / I / W / E / C
+
+        if self.color:
+            code = self.COLORS.get(record.levelno)
+            if code:
+                mark = code + mark + RESET
+
+        record.levelmark = mark
+
+        return True
+
+
+def should_color(mode, stream):
+    """--color 的三态落成"这条流上不上色"
+
+    auto 才看终端，而且只看**这条流**：`edit --list > f` 时 stdout 不是终端，就不该
+    把转义写进 f；同一时刻 stderr 可能还是终端，那边照旧上色。
+    还有两条通用约定：TERM=dumb（终端自称不支持）与 NO_COLOR（规范是"设了且非空"）
+    都不上色。
+
+    >>> import io
+    >>> should_color('never', sys.stdout)      # 不管是不是终端
+    False
+    >>> should_color('always', io.StringIO())
+    True
+    >>> should_color('auto', io.StringIO())    # 不是终端 -> auto 下不上色
+    False
+    """
+
+    if mode == COLOR_ALWAYS:
+        return True
+
+    if mode == COLOR_NEVER:
+        return False
+
+    return (stream.isatty() and
+            os.environ.get('TERM', 'dumb') != 'dumb' and
+            not os.environ.get('NO_COLOR', ''))
+
+
+def paint(text, code, colored):
+    """给 text 套上色：不上色（或 text 为空）就原样返回
+
+    空串别产出孤零零的一对转义 —— 那种看不见的垃圾最难排查。
+
+    >>> paint('*', YELLOW, False)
+    '*'
+    >>> paint('*', YELLOW, True)
+    '\\x1b[33m*\\x1b[0m'
+    >>> paint('', YELLOW, True)
+    ''
+    """
+
+    if not colored or not text:
+        return text
+
+    return code + text + RESET
 
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
@@ -136,6 +255,14 @@ EDIT_FZF = 'EDIT_FZF'
 
 # 把吞掉的失败原因打到 stderr（排查用）：非空即开，哪几个算关见 ENV_OFF
 EDIT_DEBUG = 'EDIT_DEBUG'
+
+# --color 的三态取值（EDIT_COLOR 认同一套）：auto 是"只在这条流是终端时"才上色
+COLOR_AUTO, COLOR_ALWAYS, COLOR_NEVER = 'auto', 'always', 'never'
+COLOR_CHOICES = (COLOR_AUTO, COLOR_ALWAYS, COLOR_NEVER)
+
+# 命令行上色开关。edit 常被当 $EDITOR 调起（git 那类），那种场景命令行不在我们手里，
+# 所以也认 EDIT_COLOR —— 和 EDIT_DEBUG / EDIT_FZF 同一个理由
+EDIT_COLOR = 'EDIT_COLOR'
 
 # 没有 IDE 可托付时，--open 拿它打开链接（fish 的 help 就是认这个变量的）
 BROWSER = 'BROWSER'
@@ -1600,11 +1727,12 @@ def sock_created(path: str) -> str:
     return '?' if at is None else fmt_time(at)
 
 
-def format_sockets(socks, hook):
+def format_sockets(socks, hook, colored=False):
     """把候选渲染成表格行：--list 打印它，--init --interactive 也用它
 
     打印完整 socket 路径：挑完窗口直接就能 export 给 VSCODE_IPC_HOOK_CLI。
     和 hook 相同的那个用 * 标出来；workspace 是问窗口要来的，问不到就是 ?。
+    colored 时表头压暗、当前窗口那颗 * 亮黄（见 GRAY / YELLOW）。
 
     time 列是 socket 文件的创建（bind）时间（见 sock_created）—— 同一个窗口会同时挂着
     好几个 socket，靠它区分谁新谁旧；文件不在了就是 ?。
@@ -1626,13 +1754,20 @@ def format_sockets(socks, hook):
     True
     >>> format_sockets(b, None)[1].split()[-2:]     # cli / workspace 都读不到
     ['?', '?']
+    >>> format_sockets(s, '/r/vscode-ipc-a.sock', True)[1].startswith(YELLOW + '*')
+    True
+    >>> format_sockets(s, None, True)[1].split()[0]        # 不是当前窗口：只有编号
+    '1'
     """
 
-    lines = ['  #   %-19s %-67s %-8s %-9s %s'
-             % ('time', 'socket', 'pid', 'cli', 'workspace')]
+    header = '  #   %-19s %-67s %-8s %-9s %s' % (
+        'time', 'socket', 'pid', 'cli', 'workspace')
+    lines = [paint(header, GRAY, colored)]
 
     for n, s in enumerate(socks, 1):
-        mark = '*' if s['sock'] == hook else ' '
+        # 只给 * 上色：转义是零宽字符，所以列对齐不受影响 —— 前提是别在 %-19s 这种
+        # 补白**之前**上色（补白按字节数算，带了转义就会补短）
+        mark = paint('*', YELLOW, colored) if s['sock'] == hook else ' '
 
         # shlex.quote：路径含空格时整行还能直接粘回 shell；正常路径不加引号
         lines.append('%s %2d  %-19s %-67s %-8s %-9s %s' %
@@ -1672,10 +1807,10 @@ def pick_first():
 
     return socks[0]['sock'] if socks else None
 
-def print_sockets():
+def print_sockets(colored: bool = False) -> None:
     socks = load_sockets('edit --list')
 
-    print('\n'.join(format_sockets(socks, current_socket())))
+    print('\n'.join(format_sockets(socks, current_socket(), colored)))
 
 
 class PruneResult(NamedTuple):
@@ -1912,7 +2047,8 @@ def fzf_pick(socks):
       * 选中的行认不出编号：那是 fzf 给的行不是我们要的，不代表用户取消，也回退。
     """
 
-    lines = format_sockets(socks, current_socket())
+    # 不上色：fzf 没加 --ansi，转义会被当普通字符显示出来（一串 ^[）
+    lines = format_sockets(socks, current_socket(), False)
 
     try:
         # --header-lines=1：表头那行固定住，不参与过滤
@@ -1945,7 +2081,7 @@ def fzf_pick(socks):
 # 窗口），共用这一句 + 同一个退出码，不写成两句不同的话。
 EDIT_NO_WINDOW_PICKED = 'edit --interactive: 没有选中窗口'
 
-def ask_socket(socks):
+def ask_socket(socks, colored: bool = False):
     """列出候选并让用户挑一个，返回候选项
 
     候选和提示都写 stderr：stdout 要留给最终的初始化片段，这样
@@ -1970,7 +2106,7 @@ def ask_socket(socks):
         if picked:
             return picked
 
-    sys.stderr.write('\n'.join(format_sockets(socks, current)) + '\n')
+    sys.stderr.write('\n'.join(format_sockets(socks, current, colored)) + '\n')
     if current:
         sys.stderr.write('选择窗口编号 [1-%d]（回车 = 当前窗口，q = 取消）: ' % len(socks))
     else:
@@ -2154,6 +2290,20 @@ def env_flag(name):
     return os.environ.get(name, '').lower() not in ENV_OFF
 
 
+def env_color():
+    """EDIT_COLOR 的三态取值：只认 auto / always / never，其余（含空和拼错的）回落 auto
+
+    不像 env_flag 那样"非空即开"：这里取值有三个，认不出的值（含拼错的）没有
+    "显而易见"的落点，就回到默认的 auto —— 不打搅，也不猜。（三个取值与各种怪输入
+    由 test_edit.py 的 EnvColorTest 覆盖：那边能 patch.dict 改环境，doctest 改
+    真环境会漏出去。）
+    """
+
+    v = os.environ.get(EDIT_COLOR, '').lower()
+
+    return v if v in COLOR_CHOICES else COLOR_AUTO
+
+
 def build_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
@@ -2167,6 +2317,10 @@ def build_args():
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
     parser.add_argument('--debug', action='store_true', default=env_flag(EDIT_DEBUG))
+    parser.add_argument('--color', nargs='?', const=COLOR_ALWAYS, default=env_color(),
+                        choices=COLOR_CHOICES,
+                        help='给窗口表和 --debug 的日志上色：不传=auto（仅终端），'
+                             '省略取值=always（强制，如 | less -R），never=关闭')
 
     flags, args = parser.parse_known_args()
 
@@ -2181,13 +2335,29 @@ def main():
         print_usage()
         return
 
+    # 上色按"这条流"各判一次：窗口表走 stdout，提示与日志走 stderr（--list > f 时
+    # stdout 不是终端，但 stderr 可能还是 —— 各看各的）
+    color_out = should_color(flags.color, sys.stdout)
+    color_err = should_color(flags.color, sys.stderr)
+
     # 默认 WARNING 而不是 INFO：埋点全是 debug，用户可见的失败走 sys.exit / 手写
     # stderr，所以这里再高一点，等于把"默认静默"变成结构保证 —— 以后谁加了
     # logger.info(...) 也不会漏到用户面前（--debug 才看得见）
+    #
+    # handler 自己 new 一个（basicConfig 默认那个也是 stderr）：LevelMark 得挂上去，
+    # 格式串里的 %(levelmark)s 才有着落；不上色时也挂（color=False），只注入 <D>
+    stream = logging.StreamHandler()
+    stream.addFilter(LevelMark(color_err))
+    stream.setFormatter(logging.Formatter(
+        (LOG_FORMAT_COLOR_DEBUG if color_err else LOG_FORMAT_DEBUG)
+        if flags.debug else
+        (LOG_FORMAT_COLOR if color_err else LOG_FORMAT),
+        datefmt="%Y-%m-%d %H:%M:%S"))
+
     logging.basicConfig(
         level=logging.DEBUG if flags.debug else logging.WARNING,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        format=LOG_FORMAT_DEBUG if flags.debug else LOG_FORMAT,
+        handlers=[stream],
+        force=True,
     )
 
     # --prune 和打开文件无关，放在最早：它不碰 tokens，也不该被后面那些检查影响
@@ -2239,7 +2409,7 @@ def main():
             sys.exit('edit --interactive 和 edit --list 冲突'
                      '（挑窗口时它自己会把窗口列出来）')
 
-        chosen = ask_socket(load_sockets('edit --interactive'))
+        chosen = ask_socket(load_sockets('edit --interactive'), color_err)
         redirect_socket(chosen['sock'])
 
     if flags.init:
@@ -2278,7 +2448,7 @@ def main():
     if flags.list:
         if args:
             sys.exit('edit --list 不接受文件参数')
-        print_sockets()
+        print_sockets(color_out)
         return
 
     if flags.self_test:

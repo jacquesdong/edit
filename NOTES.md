@@ -530,6 +530,56 @@ IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，�
   免费（5ms）且能区分窗口，但只给"该窗口里终端的目录"、要写去噪规则、也不好测，
   既然已经要直连 `status`，就不留这层。
 
+## `--color`：三态取值与 auto 判据（移植自 fixcomm-py c3ebf44）
+
+配色与"三态"那套直接搬 `fixcomm-py` 的 `c3ebf44`（那边对齐 logback 的
+`LOG_CONSOLE_PATTERN`，字段映射与判据见它自己的 NOTES）。搬的是**判据**，不是颜色表：
+
+| 落点 | 颜色 | 理由 |
+| --- | --- | --- |
+| 表头、日志时间戳、`file:line` | 256 色灰 `38;5;244` | 元数据压暗；不用 `faint`（SGR 2），它的实际灰度由终端主题决定 |
+| 日志级别 `<D>` / `<I>` / `<W>` / `<E>` | `38;5;24` → `38;5;65` → `33` → `31` | 越严重越亮；不用 `2;34`/`2;32`，不少主题忽略 dim 会退化成饱和 ANSI 色 |
+| 当前窗口那颗 `*` | 亮黄 `33` | 一行里唯一要跳出来的东西 |
+| 正文、socket 路径、workspace | 不着色 | 正文始终是最亮的一档 |
+
+三态取值（`--color` 与 `EDIT_COLOR` 同一套）：
+
+| 写法 | 行为 |
+| --- | --- |
+| 不传 | `auto`：只在这条流是终端时上色 |
+| `--color`（省略取值） | `always`：强制，供 `\| less -R` 用 |
+| `--color=never` | 关闭 |
+
+默认取 `auto` 而不是 `never`（和 ls / grep 那派一致），并且"默认值"与"裸取值"必须
+成对 —— 否则裸用和不传完全等价、失去意义。判据三条：
+
+```bash
+stream.isatty() and os.environ.get('TERM', 'dumb') != 'dumb' and not os.environ.get('NO_COLOR', '')
+```
+
+- **按"这条流"各判一次**：`--list` 写 stdout、提示与日志写 stderr。所以
+  `edit --list > f` 时 stdout 不是终端就不上色（别把转义写进文件），而同一时刻
+  stderr 可能仍是终端，那边照旧上色。
+- **`TERM` 缺失按 `dumb` 处理**：`get('TERM', 'dumb')` 而不是 `get('TERM') != 'dumb'`
+  （后者在没设 TERM 时会得出"能上色"）。
+- **`NO_COLOR` 按规范：设了且非空**才算（`NO_COLOR=` 空串不算关）。
+
+几处边界（都是踩过或能预见的）：
+
+- **`--init` 的片段与喂给 fzf 的候选行永不上色**：片段要被 `source`（转义会进环境
+  变量），fzf 没加 `--ansi` 会把 `^[` 当字符画出来（`fzf_pick` 里写死 `colored=False`）。
+- **补白要在上色之前**：`%-19s` 这类补白按字节数算，先上色再补白就会补短、列就歪了；
+  所以都是 `paint('%-19s' % x, ...)` 而不是 `'%-19s' % paint(x, ...)`。转义本身是零宽
+  字符，所以只给 `*` 上色不影响对齐。
+- **裸 `--color` 后面不能直接跟文件**：`nargs='?'` 会把文件名当取值，argparse 报
+  `invalid choice`（exit 2，响的，不会悄悄打错文件）。要写 `--color=always <文件>`。
+  留 `nargs='?'` 是为了"裸用 = always"那份便利，代价记在这儿（`test_bare_flag_eats_
+  the_filename` 钉住它）。
+- **`--prune` 的输出暂不上色**：和 `--list` 同是表格，真要一致再加。
+- **`%(levelmark)s` 由 `LevelMark` 注入**（尖括号也在 filter 里产出，整块才能上色）；
+  不上色时也挂这个 filter（`color=False`），于是两个格式串都用 `%(levelmark)s`，
+  不必再分"有没有装 filter" —— 少一处能漏的分支。
+
 ## 还没做 / 待办
 
 1. ~~`--wait`~~ 已直连（见上：mkstemp marker + 等窗口删它，与 CLI 同机制）。

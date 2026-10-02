@@ -12,6 +12,7 @@
 import glob
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -1825,6 +1826,185 @@ class InitTest(ProcCase):
         _, _, code = self.run_main('--interactive')
 
         self.assertIn('要带文件', code)
+
+
+class FakeStream:
+    """假流：StringIO.isatty() 恒 False，auto 那几条判据要一个能指定是不是终端的"""
+
+    def __init__(self, tty=True):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+class ColorTest(ProcCase):
+    """--color / EDIT_COLOR：三态取值、auto 的判据、以及"只给结构性那几处上色"
+
+    配色与判据移植自 fixcomm-py c3ebf44（那边对齐 logback 的 LOG_CONSOLE_PATTERN）。
+    """
+
+    def wants(self, mode, tty=True, env=None):
+        """问"这条流上不上色"，TERM / NO_COLOR 由 env 给（默认给一个像样的 TERM）"""
+
+        e = {'TERM': 'xterm'}
+        e.update(env or {})
+
+        with patch.dict(os.environ, e, clear=True):
+            return edit.should_color(mode, FakeStream(tty))
+
+    def test_always_and_never_ignore_terminal(self):
+        """always / never 不看终端：强制就是强制"""
+
+        self.assertTrue(self.wants('always', tty=False))
+        self.assertFalse(self.wants('never', tty=True))
+
+    def test_auto_needs_tty(self):
+        """只有 auto 才看这条流是不是终端"""
+
+        self.assertTrue(self.wants('auto', tty=True))
+        self.assertFalse(self.wants('auto', tty=False))
+
+    def test_dumb_term(self):
+        """TERM=dumb：终端自称不支持，不上色"""
+
+        self.assertFalse(self.wants('auto', env={'TERM': 'dumb'}))
+
+    def test_no_term_counts_as_dumb(self):
+        """TERM 整个没设：按 dumb 处理，不猜它能上色"""
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(edit.should_color('auto', FakeStream(True)))
+
+    def test_no_color(self):
+        """NO_COLOR：按规范"设了且非空"才算，空串不算"""
+
+        self.assertFalse(self.wants('auto', env={'NO_COLOR': '1'}))
+        self.assertTrue(self.wants('auto', env={'NO_COLOR': ''}))
+
+    def test_env_color(self):
+        """EDIT_COLOR 认三个取值（大小写不敏感），认不出的回落 auto"""
+
+        for want, val in (('never', 'NEVER'), ('always', 'always'), ('auto', 'AUTO')):
+            with self.subTest(val), patch.dict(os.environ, {edit.EDIT_COLOR: val}):
+                self.assertEqual(edit.env_color(), want)
+
+        for bad in ('', '1', 'yes', 'colour'):
+            with self.subTest(bad), patch.dict(os.environ, {edit.EDIT_COLOR: bad}):
+                self.assertEqual(edit.env_color(), 'auto')
+
+    def test_env_color_is_the_default(self):
+        """EDIT_COLOR 就是 --color 的默认值：edit 常被当 $EDITOR 调起，命令行不在手里"""
+
+        with patch.dict(os.environ, {edit.EDIT_COLOR: 'never'}), \
+                patch.object(sys, 'argv', ['edit.py']):
+            flags, _ = edit.build_args()
+
+        self.assertEqual(flags.color, 'never')
+
+    def test_bare_flag_means_always(self):
+        """裸 --color = always：默认值与"省略取值"必须成对，否则裸用等于没传"""
+
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, 'argv', ['edit.py', '--color']):
+            flags, _ = edit.build_args()
+
+        self.assertEqual(flags.color, 'always')
+
+    def test_value_then_file(self):
+        """--color=always 后面照常跟文件"""
+
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, 'argv', ['edit.py', '--color=always', 'a.py']):
+            flags, args = edit.build_args()
+
+        self.assertEqual((flags.color, args), ('always', ['a.py']))
+
+    def test_bare_flag_eats_the_filename(self):
+        """已知代价：裸 --color 后直接跟文件 -> 文件名被当取值，argparse 用法错误退出
+
+        留 nargs='?' 是为了"裸用 = always"那份便利，代价落在这一条上：报错是响的
+        （exit 2），不会悄悄把文件当成别的东西。所以用法里写 --color=always <文件>。
+        """
+
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, 'argv', ['edit.py', '--color', 'a.py']), \
+                redirect_stderr(StringIO()):        # argparse 的用法提示，别混进测试输出
+            with self.assertRaises(SystemExit):
+                edit.build_args()
+
+    def test_formats_use_levelmark(self):
+        """两个格式串都用 %(levelmark)s：不上色也挂着 filter，格式化才不会缺字段"""
+
+        self.assertIn('%(levelmark)s', edit.LOG_FORMAT)
+        self.assertIn('%(levelmark)s', edit.LOG_FORMAT_COLOR)
+
+        rec = logging.LogRecord('c', logging.WARNING, 'f', 1, 'boom', None, None)
+
+        self.assertTrue(edit.LevelMark(False).filter(rec))     # 不过滤：照常往下走
+        self.assertIn('<W> boom', logging.Formatter(edit.LOG_FORMAT).format(rec))
+
+    def test_marks_current_and_header(self):
+        """上色只落在两处：表头压暗、当前窗口那颗 * 亮黄；其余原样"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.pin_created()
+        socks = self.candidates()
+        rows = edit.format_sockets(socks, self.sock1, True)
+
+        self.assertTrue(rows[0].startswith(edit.GRAY), rows[0])
+        self.assertTrue(rows[1].startswith(edit.YELLOW + '*'), rows[1])
+        self.assertNotIn('\x1b', rows[2])                # 不是当前窗口的那行不动
+        self.assertIn(socks[0]['sock'], rows[1])         # 上色不改变内容
+
+    def test_list_defaults_to_plain(self):
+        """默认不上色：--list 的 stdout 不是终端时（--list > f）不该写进转义"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, _, _ = self.run_main('--list', hook=self.sock1)
+
+        self.assertNotIn('\x1b', out)
+        self.assertTrue(out.split('\n')[1].startswith('*'))
+
+    def test_list_forced(self):
+        """--color=always：不看终端，强制上色（edit --list --color=always | less -R）"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        out, _, _ = self.run_main('--list', '--color=always', hook=self.sock1)
+
+        self.assertIn(edit.YELLOW + '*', out)
+
+    def test_prompt_list_is_colored(self):
+        """fzf 关掉时走编号输入：那份列表写 stderr，按 stderr 自己的判据上色"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+
+        _, err, _ = self.run_main('--interactive', '--color=always', self.a,
+                                  hook=self.sock1, answer='1')
+
+        self.assertIn(edit.YELLOW + '*', err)
+
+    def test_fzf_gets_plain_lines(self):
+        """喂给 fzf 的行不带转义：fzf 没加 --ansi，转义会被当字符画出来"""
+
+        self.add_window(path=self.sock1, body=status_body('/w/proj'))
+        self.pin_created()
+        seen: dict[str, str] = {}
+
+        def fake(argv, **kw):
+            seen['input'] = kw.get('input', '')
+
+            return subprocess.CompletedProcess(argv, 0, '1\n', '')
+
+        with patch.object(edit, 'use_fzf', lambda: True), \
+                patch('subprocess.run', fake):
+            self.run_main('--interactive', '--color=always', self.a, hook=self.sock1,
+                          answer='1')
+
+        self.assertIn(self.sock1, seen['input'])
+        self.assertNotIn('\x1b', seen['input'])
 
 
 if __name__ == '__main__':

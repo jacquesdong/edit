@@ -39,7 +39,19 @@ edit --init fish --interactive   列出窗口并挑一个，输出它的初始�
 edit --interactive <文件...>     挑一个窗口，在挑中的那个里打开文件
 
 EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本来就是编号）
+
+edit --color=always …            给输出上色（窗口表的表头、当前窗口那颗 *、--debug
+                                 日志的时间戳与 <D>/<E>）；不传=auto：只在这条流是
+                                 终端时上色，TERM=dumb 或设了 NO_COLOR 就不上色。
+                                 --list 看 stdout、提示与日志看 stderr，各判各的。
+                                 EDIT_COLOR=never 等价（edit 被当 $EDITOR 调起时用）。
+                                 裸 --color 后面不能直接跟文件（文件名会被当取值），
+                                 那种写法要写 --color=always <文件>
 ```
+
+着色只落在"结构性"的那几处，正文一律不着色；`--init` 的片段和喂给 fzf 的候选行
+**永远不上色**（前者要被 `source`、后者 fzf 没加 `--ansi` 会把转义画出来）。配色与
+三态判据移植自 `fixcomm-py` 的 `c3ebf44`，取舍记在 NOTES。
 
 `--open` 走的是第三种报文 `{"type":"openExternal","uris":[…]}`（remote-cli 的
 `--openExternal` 就是它，IDE 的 `bin/helpers/browser.sh` 也是这么开网页的）：链接不是
