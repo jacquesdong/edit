@@ -19,6 +19,8 @@ edit <文件...>               在当前 IDE 窗口打开文件
 edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
 edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
 edit -m <文件> <文件> <base> <结果>   三向合并（VS Code 系的 --merge）
+edit --open <链接...>        把链接交给系统（本地）浏览器打开，不起 node
+                             （fish: set -Ux BROWSER 'edit --open'，help 就走它）
 edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
 eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -38,6 +40,15 @@ edit --interactive <文件...>     挑一个窗口，在挑中的那个里打开
 
 EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本来就是编号）
 ```
+
+`--open` 走的是第三种报文 `{"type":"openExternal","uris":[…]}`（remote-cli 的
+`--openExternal` 就是它，IDE 的 `bin/helpers/browser.sh` 也是这么开网页的）：链接不是
+文件，塞进 `fileURIs` 会变成 `file:///当前目录/https:/…`，所以它单独一条路 —— 取值
+原样当 `uris` 发出去，不像链接（没有 `://`）直接报错退出，不悄悄拿去当文件打开。
+直连不上时退回两级：code 系 CLI 加 `--openExternal`（和直连等价，只是要起一次 node），
+别的 CLI（vim / `$EDITOR`…）就退 `$BROWSER`（fish 的 `help` 认的那个变量，可带参数），
+再不行是 `xdg-open` / `open`。`BROWSER` 写的是 `edit --open` 自己时跳过 —— 没有窗口
+可直连时会一圈圈 exec 回来。
 
 挑窗口（`--interactive`）时，装了 fzf 且 stdin 是终端就用 fzf 过滤。在 fzf 里 Esc /
 Ctrl-C 就是取消（和输编号时按 `q` 一样的收场：一句提示后退出，不再多问一遍）；只有

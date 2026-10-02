@@ -7,6 +7,9 @@
   edit <文件...>               在当前 IDE 窗口打开文件
   edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
   edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
+  edit --open <链接...>        把链接交给系统浏览器打开（不走编辑器：直连窗口的
+                               openExternal，本地浏览器就会打开它；shell 里记得
+                               给带 & 的链接加引号）
   edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -77,6 +80,15 @@
 waitMarkerFilePath 里，窗口在文件被关掉时删掉它，我们等它消失 —— 和
 remote-cli 一模一样（它也是 createWaitMarkerFile + 每秒 existsSync 轮询），
 所以 git commit 之类的场景同样等得住，而且不起 node。
+
+--open 走的是另一种报文：{"type":"openExternal","uris":[…]}（remote-cli 的
+--openExternal 就是它，IDE 的 browser.sh 也是这么开网页的）。链接不是文件 ——
+塞进 fileURIs 会变成 file:///当前目录/https:/… 这种东西，所以它自带一条路：
+取值不认行号、不转绝对路径、也不按 CLI 种类翻译，原样当 uris 发出去；不像链接
+（没有 ://）直接报错，不悄悄拿去当文件打开。直连不上时退回两级：code 系 CLI 加
+--openExternal（和直连是同一件事，只是要起一次 node），别的 CLI 就退 $BROWSER
+（fish 的 help 认的那个变量，可带参数）或 xdg-open —— BROWSER 写的是自己时跳过，
+免得没有窗口可直连时一圈圈 exec 回来。
 """
 
 from __future__ import annotations       # 注解不求值：别名放哪都行，运行期也不构造它们
@@ -125,16 +137,27 @@ EDIT_FZF = 'EDIT_FZF'
 # 把吞掉的失败原因打到 stderr（排查用）：非空即开，哪几个算关见 ENV_OFF
 EDIT_DEBUG = 'EDIT_DEBUG'
 
+# 没有 IDE 可托付时，--open 拿它打开链接（fish 的 help 就是认这个变量的）
+BROWSER = 'BROWSER'
+
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
 
-CODE_LIKE = ('code', 'buddycn', 'trae-cn', 'cursor',)
-VIM_LIKE = ('vim', 'nvim', 'vi',)
+# server 端窗口 socket 的文件名前缀（/run/user/<uid>/vscode-ipc-<uuid>.sock），
+# find_sockets 拿它从 /proc/net/unix 里筛出 IDE 窗口的 socket
+SOCK_PREFIX = 'vscode-ipc-'
+
+# /proc 的根：find_sockets 全程只从这里读，测试可以把它指到假目录
+PROC = '/proc'
 
 # 命令行工具分类
 #
 # VS Code 系，写它自己的命令行时用 --goto 跳转
 # vim 系, 使用 +行号 跳转
 # nano / emacs 系同样用 +行号，单开一类是因为列号写法不同（见 EMIT）
+
+CODE_LIKE = ('code', 'buddycn', 'trae-cn', 'cursor',)
+VIM_LIKE  = ('vim', 'nvim', 'vi',)
+
 CLI_KIND = {}
 CLI_KIND_CODE  = 'code'
 CLI_KIND_VIM   = 'vim'
@@ -154,16 +177,22 @@ CLI_KIND['nano'] = CLI_KIND_NANO
 for i in ('emacs', 'emacsclient'):       # 当 $EDITOR 用的是后者
     CLI_KIND[i] = CLI_KIND_EMACS
 
-# file:行[:列]：只有末尾的数字才算行列号，非贪婪的 (.+?) 把冒号让给文件名，
-# 所以文件名里带冒号也解析得动（parse_goto 靠它，split_goto 是它的一步）
-GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
 
-# server 端窗口 socket 的文件名前缀（/run/user/<uid>/vscode-ipc-<uuid>.sock），
-# find_sockets 拿它从 /proc/net/unix 里筛出 IDE 窗口的 socket
-SOCK_PREFIX = 'vscode-ipc-'
+# --open：把链接交给系统（本地）浏览器 —— 用的是协议里第四种 type 的那条路
+# （NOTES 那张表的 openExternal），之前没接线。链接不是文件：塞进 open 的
+# fileURIs 会变成 file:///home/…/https:/… 这种东西，所以它自带一条路 ——
+# --open 的取值不进 token 流水线（不认行号、不转绝对、不按 kind 翻译），
+# 原样当 uris 发出去；CLI 那侧只有 code 系认 --openExternal，其余的退回
+# $BROWSER（fish 的约定）或 xdg-open。
+#
+# 报文之外的两种走法：
+#   code 系 CLI: cli --openExternal <链接…>   —— IDE 自己的 browser.sh 就是这么调的
+#                （它和直连是同一件事，只是要起一次 node）
+#   $BROWSER   : BROWSER 可带参数，链接追加在后（fish 的 help 就是这么拼的）
 
-# /proc 的根：find_sockets 全程只从这里读，测试可以把它指到假目录
-PROC = '/proc'
+
+# $BROWSER 没设、或设的是自己时的兜底：Linux 桌面是 xdg-open，macOS 是 open
+OPENERS = ('xdg-open', 'open')
 
 
 def current_socket():
@@ -429,6 +458,11 @@ def cli_kind(cli):
         return CLI_KIND_CODE
 
     return None
+
+# file:行[:列]：只有末尾的数字才算行列号，非贪婪的 (.+?) 把冒号让给文件名，
+# 所以文件名里带冒号也解析得动（parse_goto 靠它，split_goto 是它的一步）
+GOTO_RE = re.compile(r'^(.+?):(\d+)(?::(\d+))?$')
+
 
 def split_goto(arg: str) -> GotoTarget | None:
     """'foo.py:12:3' -> ('foo.py', '12', '3')；不像 file:行号 就返回 None
@@ -1858,11 +1892,6 @@ FZF_CANCEL_CODE = 130
 # 取消 = 直接退出；用不了 = 回退编号输入（见 ask_socket）。
 FZF_CANCELLED = object()
 
-# --interactive 取消时的收场语：fzf 里按 Esc 和编号输入按 q 是同一种意图（都没选中
-# 窗口），共用这一句 + 同一个退出码，不写成两句不同的话。
-NO_WINDOW_PICKED = 'edit --interactive: 没有选中窗口'
-
-
 def fzf_pick(socks):
     """用 fzf 挑一个窗口：返回候选项；取消返回 FZF_CANCELLED；认不出 / 拉不起来返回 None
 
@@ -1907,6 +1936,9 @@ def fzf_pick(socks):
 
     return pick_socket(socks, n)
 
+# --interactive 取消时的收场语：fzf 里按 Esc 和编号输入按 q 是同一种意图（都没选中
+# 窗口），共用这一句 + 同一个退出码，不写成两句不同的话。
+EDIT_NO_WINDOW_PICKED = 'edit --interactive: 没有选中窗口'
 
 def ask_socket(socks):
     """列出候选并让用户挑一个，返回候选项
@@ -1929,7 +1961,7 @@ def ask_socket(socks):
     if use_fzf():
         picked = fzf_pick(socks)
         if picked is FZF_CANCELLED:
-            sys.exit(NO_WINDOW_PICKED)      # Esc / Ctrl-C：Esc 到哪都是"退出"，别再问一遍
+            sys.exit(EDIT_NO_WINDOW_PICKED)      # Esc / Ctrl-C：Esc 到哪都是"退出"，别再问一遍
         if picked:
             return picked
 
@@ -1948,9 +1980,151 @@ def ask_socket(socks):
 
     chosen = pick_socket(socks, answer, current)
     if not chosen:
-        sys.exit(NO_WINDOW_PICKED)
+        sys.exit(EDIT_NO_WINDOW_PICKED)
 
     return chosen
+
+# 链接的样子：scheme://…（http / https / file…），外加 mailto: / tel: 这两个不带 // 的。
+# 只用来校验 --open 的取值，不改写它 —— 不像链接就报错，别悄悄拿去当文件名打开。
+# 不认 localhost:8080/x（没有 scheme）：那种写全 https:// 就好。
+URI_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://|mailto:|tel:)')
+
+def is_uri(s: str) -> bool:
+    """像个链接吗：scheme://…（或 mailto: / tel:）
+
+    >>> is_uri('https://fishshell.com/docs/4.9/cmds/abbr.html')
+    True
+    >>> is_uri('file:///tmp/a.txt')
+    True
+    >>> is_uri('mailto:a@b.c')
+    True
+    >>> is_uri('a.txt')
+    False
+    >>> is_uri('a.txt:3')                   # 别把 文件:行号 当链接
+    False
+    >>> is_uri('localhost:8080/x')          # 没有 scheme
+    False
+    """
+
+    return bool(URI_RE.match(s))
+
+
+class OpenExternalMsg(TypedDict):
+    """openExternal 报文：交给系统浏览器打开，不是编辑器里的标签页"""
+
+    type: Literal['openExternal']
+    uris: list[str]
+
+
+def open_external_msg(uris: list[str]) -> OpenExternalMsg:
+    """链接 -> openExternal 报文（字段就是 CLI 发的那两个，见 fixtures 的 open-external）
+
+    取值原样发，不学 CLI 那一步规范化（它把 https://example.com 写成
+    https://example.com/ —— URI.parse 再 toString 补的斜杠）：server 端自己会
+    parse（openExternal 里只有 scheme 是 file 的走解析，其余整串转交），补不补都一样。
+
+    >>> open_external_msg(['https://fishshell.com/docs/'])
+    {'type': 'openExternal', 'uris': ['https://fishshell.com/docs/']}
+    >>> open_external_msg(['a', 'b'])['uris']
+    ['a', 'b']
+    """
+
+    return {'type': 'openExternal', 'uris': list(uris)}
+
+
+# BROWSER 写的是自己时就跳过：BROWSER='edit --open' 又正好没有窗口可直连时，
+# 一路 exec 回自己会一圈接一圈停不下来
+SELF_NAMES = ('edit', 'edit.py')
+
+
+def find_browser() -> list[str] | None:
+    """打开链接的兜底程序：$BROWSER（可带参数），再是 xdg-open / open
+
+    BROWSER 的写法和 fish 的 help 一致：整串按 shell 词切开，链接追加在后面
+    （`BROWSER='edit --open'` -> `edit --open <链接>`）。
+
+    >>> os.environ['BROWSER'] = 'true -a'
+    >>> find_browser() == [shutil.which('true'), '-a']
+    True
+    >>> os.environ['BROWSER'] = 'edit --open'       # 是自己：跳过，别自己调自己
+    >>> find_browser() is None or os.path.basename(find_browser()[0]) != 'edit'
+    True
+    >>> _ = os.environ.pop('BROWSER')
+    """
+
+    v = os.environ.get(BROWSER)
+    if v:
+        cmd = split_cmd(v)
+
+        if cmd and os.path.basename(cmd[0]) not in SELF_NAMES:
+            return cmd
+
+    for name in OPENERS:
+        path = shutil.which(name)
+        if path:
+            return [path,]
+
+    return None
+
+
+def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
+              flags: argparse.Namespace) -> None:
+    """--open 的执行：先直连窗口发 openExternal，不行再退 CLI / 系统浏览器
+
+    sock 是 main 已经定下来的"当前窗口"（--interactive / --first 也走那条路）；
+    why_cli 是"为什么没直连"，只在选中的是 remote-cli 时用来换一句能照做的提示。
+
+    三条路打印/执行的东西和 main 那两条一致：--dry-run 打报文或命令行，
+    真跑的也记进 --debug。
+    """
+
+    msg = open_external_msg(uris)
+
+    if sock:
+        req = 'socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False))
+
+        if flags.dry_run:
+            print(req)
+            return
+
+        logger.debug('%s', req)
+        ok, detail = socket_open(sock, msg)
+
+        if ok:
+            return
+
+        sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
+        why_cli = 'socket 打不开（%s）' % detail
+
+    cli = find_cli()
+    kind = cli_kind(cli[0]) if cli else None
+
+    # code 系自己就有 --openExternal（和直连是同一件事，只是要起一次 node）；
+    # 别的 CLI（vim / $EDITOR…）没有这个概念，那就退回系统浏览器 —— 链接不需要
+    # 按 kind 翻译，原样追加在后面就行
+    if cli and kind == CLI_KIND_CODE:
+        if why_cli and have_remote_cli(os.path.dirname(cli[0])):
+            sys.stderr.write(hint_remote_cli(why_cli))
+
+        argv = cli + ['--openExternal'] + uris
+    else:
+        browser = find_browser()
+
+        if not browser:
+            sys.exit('edit --open: 没有 IDE 窗口，也没有能打开链接的程序'
+                     '（设 %s，或装 xdg-open）' % BROWSER)
+
+        argv = browser + uris
+
+    line = shlex.join(argv)
+
+    if flags.dry_run:
+        print(line)
+        return
+
+    logger.debug('exec %s', line)
+    os.execv(argv[0], argv)
+
 
 def print_usage():
     """打印本文件开头的用法说明
@@ -1959,6 +2133,7 @@ def print_usage():
     """
 
     print(__doc__)
+
 
 # env_flag() 认的"关"：置空、假、关闭、否、never（大小写由 env_flag 统一折成小写）。
 # EDIT_DEBUG / EDIT_FZF 共用这一套；'never' 是 EDIT_FZF 那边的老写法（--color=never 那种），
@@ -1973,6 +2148,7 @@ def env_flag(name):
     """
     return os.environ.get(name, '').lower() not in ENV_OFF
 
+
 def build_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
@@ -1981,6 +2157,7 @@ def build_args():
     parser.add_argument('--first', action='store_true')
     parser.add_argument('--prune', action='store_true')
     parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--open', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
@@ -1989,6 +2166,7 @@ def build_args():
     flags, args = parser.parse_known_args()
 
     return flags, args
+
 
 def main():
     flags, args = build_args()
@@ -2017,6 +2195,18 @@ def main():
 
         print_prune(flags.dry_run)
         return
+
+    # --open 的取值是链接，不走下面"文件参数"那套翻译；先在这里校验：
+    # 和 -d 空着那个判定同一个位置（挑窗口之前），免得挑完了才发现链接不对
+    if flags.open:
+        if not args:
+            sys.exit('edit --open: 后面没有链接'
+                     '（edit --open https://fishshell.com/docs/）')
+
+        bad = [a for a in args if not is_uri(a)]
+
+        if bad:
+            sys.exit('edit --open: 不像链接（要带 ://）：%s' % ' '.join(bad))
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv（纯函数，先扫出来）
     tokens = normalize(args)
@@ -2116,6 +2306,11 @@ def main():
         # 不在 IDE 终端里本来就该走 CLI，记一条好回答"为什么这次没直连"
         why_cli = '没有 %s' % IPC_HOOK
         logger.debug('no %s, falling back to cli', IPC_HOOK)
+
+    # --open 到这儿才发：窗口已经定下来（--interactive / --first 走的还是上面那条
+    # 路），链接也不用再过一遍文件参数那套翻译
+    if flags.open:
+        return open_uris(args, sock, why_cli, flags)
 
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
     marker = make_marker() if sock and has_wait(tokens) else None

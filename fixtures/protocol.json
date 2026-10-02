@@ -49,6 +49,23 @@
       "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
     }
   },
+  "open-external": {
+    "args": [
+      "--openExternal",
+      "https://fishshell.com/docs/4.9/cmds/abbr.html"
+    ],
+    "direct": true,
+    "msg": {
+      "type": "openExternal",
+      "uris": [
+        "https://fishshell.com/docs/4.9/cmds/abbr.html"
+      ]
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
   "open-file": {
     "args": [
       "/tmp/a.txt"

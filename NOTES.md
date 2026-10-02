@@ -35,7 +35,7 @@ Content-Length: 189
 |---|---|---|
 | `open` | 开文件 / 文件夹、diff、merge、add | JSON |
 | `status` | 让**窗口**跑 `_remoteCLI.getSystemStatus`，返回诊断文本 | JSON 字符串 |
-| `openExternal` | 交给系统打开 URL | JSON |
+| `openExternal` | 交给系统打开 URL（`--open` 用的，见下） | JSON |
 | `extensionManagement` | 装/卸扩展 | JSON |
 
 `remote-cli` 的收包逻辑（抓自 `server-cli.js`）：读完整回复 → `JSON.parse` →
@@ -147,7 +147,7 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   里实测，Esc 与 Ctrl-C 都是 130；fzf 自己报错是 2、找不到是 127 / OSError），
   所以按 `FZF_CANCEL_CODE` 认出来，`fzf_pick()` 返回 `FZF_CANCELLED`（身份比较的
   哨兵），`ask_socket()` 直接退出 —— 收场语就是编号路径按 q 的那句
-  `NO_WINDOW_PICKED`，不再弹一遍编号提示（早先这里和"用不了"合并成一支，于是按
+  `EDIT_NO_WINDOW_PICKED`，不再弹一遍编号提示（早先这里和"用不了"合并成一支，于是按
   Esc 反而会多问一次，得按两次才退）；
 - 剩下三种才算"这条路不通"，落回"列编号 + 读一行"那套，行为和不装 fzf 时一模一样：
   拉不起来（OSError）、别的退出码（fzf 报错等）、选中的行认不出编号（那是它给的行
@@ -354,6 +354,45 @@ edit -g /tmp/a.txt:3 /tmp/b.txt:9
 
 多个文件各带行号（`edit a.txt:3 b.txt:9`）vim 只会把两个 `+N` 依次用在第一个
 buffer 上 —— 只有位置参数的版本里就已经是这样，不是这次引入的。
+
+### `--open`：链接走 openExternal（协议里第四种 type）
+
+`edit --open <链接…>` 发的是 `{"type":"openExternal","uris":[…]}`，**不是** open 报文 ——
+就是上面那张表里的第四种，之前没接线。链接不是文件：塞进 `fileURIs` 会变成
+`file:///当前目录/https:/…` 这种东西，所以它单独一条路。
+
+报文形状抓自真 CLI（`fixtures/protocol.json` 的 `open-external`）：
+
+```bash
+python3 tools/capture_cli.py --name open-external -- --openExternal https://fishshell.com/docs/4.9/cmds/abbr.html
+```
+
+只有 `type` / `uris` 两个字段；多个链接一次发完（实测 `--openExternal a b` -> `uris` 两个）。
+两点与 CLI 的差别，都是**故意**的：
+
+- CLI 会把 `https://example.com` 规范化成 `https://example.com/`（`URI.parse().toString()`
+  补的斜杠），我们原样发 —— server 端（`server-main.js`）自己 parse，`openExternal` 里
+  只有 scheme 是 `file` 的走解析（`i.scheme==="file"?i:t`），其余整串转交，补不补都一样；
+- 不像链接的取值 CLI 反而当文件（实测 `--openExternal not-a-url` 抓到
+  `file:///…/not-a-url`），我们不猜：没有 `://`（或 `mailto:` / `tel:`）就报
+  "不像链接"退出 1 —— 悄悄拿去当文件打开比报错糟。
+
+取值**不进 token 流水线**：不认行号、不转绝对路径、也不按 kind 翻译（链接不需要
+`--goto` / `+N` 那套），也不参与 `-a` / `-d` "有没有目标"的判定 —— 校验放在挑窗口
+之前（`--prune` 之后、`normalize` 之前），免得挑完了才发现链接不对。
+
+直连之外还有两级兜底：
+
+| 走法 | 什么时候 | 命令行 |
+|---|---|---|
+| code 系 CLI | 没有窗口 / 窗口不收 | `buddycn --openExternal <链接…>` —— IDE 的 `bin/helpers/browser.sh` 就是这么调 `server-cli.js` 的，和直连等价，只是要起一次 node |
+| `$BROWSER` | 选中的 CLI 不是 code 系（vim / `$EDITOR`…） | `$BROWSER <链接…>`：可带参数，链接追加在后 —— fish 的 `help` 就是这么拼的（`echo $BROWSER | read -at` 切成 argv 再拼 URL） |
+| `xdg-open` / `open` | 连 `BROWSER` 都没设 | Linux 桌面是 xdg-open，macOS 是 open；本机实测 xdg-open 没装，`/usr/bin/open -> run-mailcap` |
+
+**BROWSER 写的是自己时跳过**（`SELF_NAMES`）：`BROWSER='edit --open'` 又正好没有窗口
+可直连时，会一路 exec 回自己 —— exec 是换进程、不是 fork 炸弹，但同样一圈接一圈停不下来。
+实测走 `--dry-run`（不真开浏览器）：那一次打印的是 `/usr/bin/open https://example.com`，
+不是 `edit --open …`。
 
 ### 认不出产品名时怎么定 kind（`cli_kind` 的两条判据）
 

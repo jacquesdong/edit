@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -179,11 +180,12 @@ class EditCase(unittest.TestCase):
 
         return path
 
-    def run_edit(self, *args, hook=None):
+    def run_edit(self, *args, hook=None, extra_env=None):
         env = dict(os.environ)
         env.pop(edit.IPC_HOOK, None)
         env['EDIT_CLI'] = self.fake_cli
         env['FAKE_CLI_OUT'] = self.cli_out
+        env.update(extra_env or {})
 
         if hook is not None:
             env[edit.IPC_HOOK] = hook
@@ -1216,6 +1218,15 @@ class ProtocolFixtureTest(unittest.TestCase):
 
                 self.assertEqual(got, want)
 
+    def test_open_external_matches_cli(self):
+        """openExternal 那条（--open 用的）：字段与取值都和 CLI 一致"""
+
+        case = self.cases()['open-external']
+
+        self.assertEqual(case['msg']['type'], 'openExternal')
+        # args 是 ['--openExternal', <链接>…]：去掉选项就是 uris
+        self.assertEqual(edit.open_external_msg(case['args'][1:]), case['msg'])
+
     def test_diff_is_still_needed(self):
         """标了 diff 的字段必须真的与 CLI 不同，否则上游改了、例外该删"""
 
@@ -1319,6 +1330,127 @@ class WaitTest(EditCase):
                 edit.wait_marker(marker)
 
         self.assertFalse(os.path.exists(marker))
+
+
+class OpenExternalTest(ProcCase):
+    """--open：链接走 openExternal 报文，不是 open 的 fileURIs
+
+    多数用例走子进程（run_edit，EDIT_CLI 指向假 CLI）；"没有程序能开链接"那条
+    要在进程内跑（run_main）—— 那之后就是 exec，测试进程不能真被换掉。
+    """
+
+    URL = 'https://fishshell.com/docs/4.9/cmds/abbr.html'
+
+    def _script(self, name):
+        """写一个把参数写进 $FAKE_CLI_OUT、再以 7 退出的脚本（假 CLI / 假浏览器）"""
+
+        path = os.path.join(self.dir, name)
+
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_CLI_OUT"\nexit 7\n')
+
+        os.chmod(path, 0o755)
+
+        return path
+
+    def code_cli(self):
+        """假 CLI 改名 buddycn：cli_kind 判成 code 系（认 --openExternal）"""
+
+        self.fake_cli = self._script('buddycn')
+
+        return self.fake_cli
+
+    def test_sent_to_window(self):
+        msg = self.open_msg('--open', self.URL)
+
+        self.assertEqual(msg, {'type': 'openExternal', 'uris': [self.URL]})
+
+    def test_many_uris(self):
+        win = self.add_window()
+        proc = self.run_edit('--open', self.URL, 'https://example.com/x',
+                             hook=win.path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(win.requests), 1, '一次发完，别一条链接一个请求')
+        self.assertEqual(win.requests[0]['uris'],
+                         [self.URL, 'https://example.com/x'])
+
+    def test_dry_run_prints_socket_json(self):
+        self.win = self.add_window()
+        proc = self.run_edit('--dry-run', '--open', self.URL, hook=self.win.path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        head, _, rest = proc.stdout.strip().partition(' ')
+        self.assertEqual(head, 'socket')
+
+        sock, _, payload = rest.partition(' ')
+        self.assertEqual(sock, self.win.path)
+        self.assertEqual(json.loads(payload),
+                         {'type': 'openExternal', 'uris': [self.URL]})
+        self.assertEqual(self.win.requests, [], '--dry-run 不该真发')
+
+    def test_window_500_falls_back_to_code_cli(self):
+        """窗口不收：退回 code 系 CLI 的 --openExternal（IDE 的 browser.sh 就是这么调的）"""
+
+        self.code_cli()
+        self.win = self.add_window(code=500, body='boom')
+        proc = self.run_edit('--open', self.URL, hook=self.win.path)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIn('socket 打不开', proc.stderr)
+        self.assertEqual(self.cli_args(), '--openExternal ' + self.URL)
+
+    def test_falls_back_to_browser(self):
+        """没有窗口、CLI 也不是 code 系（假 CLI 谁都不认）：走 $BROWSER"""
+
+        browser = self._script('my-browser')
+        proc = self.run_edit('--open', self.URL, extra_env={'BROWSER': browser})
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertEqual(self.cli_args(), self.URL, '链接原样追加在 BROWSER 后面')
+
+    def test_browser_env_may_take_args(self):
+        """$BROWSER 可以带参数（fish 的 help 就是这么调的）：切成 argv 再拼链接"""
+
+        with patch.dict(os.environ, {'BROWSER': 'true -a'}):
+            self.assertEqual(edit.find_browser(), [shutil.which('true'), '-a'])
+
+    def test_browser_pointing_at_itself_is_skipped(self):
+        """BROWSER 是 'edit --open' 时跳过：没有窗口可直连会一圈圈 exec 回自己"""
+
+        with patch.dict(os.environ, {'BROWSER': 'edit --open'}):
+            with patch.object(edit, 'OPENERS', ()):     # 断掉兜底，结果才是确定的
+                self.assertIsNone(edit.find_browser())
+
+    def test_not_a_uri(self):
+        """不像链接就报错，不悄悄拿去当文件打开"""
+
+        for args in (['--open', 'a.txt:3'], ['--open', self.a],
+                     ['--open', self.URL, 'b.txt']):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('不像链接', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_without_uri(self):
+        proc = self.run_edit('--open')
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('后面没有链接', proc.stderr)
+
+    def test_no_way_to_open(self):
+        """没有窗口、CLI 不是 code 系、BROWSER 与兜底都没有：报错退出，不 exec"""
+
+        with patch.object(edit, 'OPENERS', ()):
+            out, _, code = self.run_main('--open', self.URL,
+                                         extra_env={'EDIT_CLI': '/bin/true',
+                                                    'BROWSER': ''})
+
+        self.assertIn('没有 IDE 窗口', str(code))
+        self.assertEqual(out, '')
 
 
 class ListTest(ProcCase):
