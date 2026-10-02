@@ -47,8 +47,16 @@ EDIT_FZF=0 edit … --interactive  不用 fzf，改用编号挑（脚本里本�
 原样当 `uris` 发出去，不像链接（没有 `://`）直接报错退出，不悄悄拿去当文件打开。
 直连不上时退回两级：code 系 CLI 加 `--openExternal`（和直连等价，只是要起一次 node），
 别的 CLI（vim / `$EDITOR`…）就退 `$BROWSER`（fish 的 `help` 认的那个变量，可带参数），
-再不行是 `xdg-open` / `open`。`BROWSER` 写的是 `edit --open` 自己时跳过 —— 没有窗口
-可直连时会一圈圈 exec 回来。
+再不行是 `xdg-open`（macOS 才是 `open`：Debian 的 `/usr/bin/open` 是 run-mailcap，吃
+文件不吃链接）。`BROWSER` 写的是 `edit --open` 自己时跳过 —— 没有窗口可直连时会一圈圈
+exec 回来。
+
+名字有个撞车要心里有数：Debian / Ubuntu 的 `mime-support` 自带 `/usr/bin/edit`
+（`run-mailcap` 的别名，还有 `see` / `view` / `compose` / `print`）。我们的 `edit`
+靠 `~/.local/bin` 排在 `/usr/bin` 前面压住它 —— 不加载 dotfiles 的 shell（`sh -lc`）、
+sudo / cron、以及没放软链的机器上，`edit` 就是 run-mailcap：它按 mime 类型处理**文件**，
+本机 `run-mailcap --action=edit a.txt` 直接报 `no "edit" rule for type "text/plain"`
+（退出非 0，不会静默做错事，但也打不开文件）。
 
 挑窗口（`--interactive`）时，装了 fzf 且 stdin 是终端就用 fzf 过滤。在 fzf 里 Esc /
 Ctrl-C 就是取消（和输编号时按 `q` 一样的收场：一句提示后退出，不再多问一遍）；只有

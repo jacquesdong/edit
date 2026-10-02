@@ -387,7 +387,20 @@ python3 tools/capture_cli.py --name open-external -- --openExternal https://fish
 |---|---|---|
 | code 系 CLI | 没有窗口 / 窗口不收 | `buddycn --openExternal <链接…>` —— IDE 的 `bin/helpers/browser.sh` 就是这么调 `server-cli.js` 的，和直连等价，只是要起一次 node |
 | `$BROWSER` | 选中的 CLI 不是 code 系（vim / `$EDITOR`…） | `$BROWSER <链接…>`：可带参数，链接追加在后 —— fish 的 `help` 就是这么拼的（`echo $BROWSER | read -at` 切成 argv 再拼 URL） |
-| `xdg-open` / `open` | 连 `BROWSER` 都没设 | Linux 桌面是 xdg-open，macOS 是 open；本机实测 xdg-open 没装，`/usr/bin/open -> run-mailcap` |
+| `xdg-open` | 连 `BROWSER` 都没设 | Linux 桌面；macOS 上换成 `open`（`OPENERS` 按 `sys.platform` 排） |
+
+**`open` 在 Debian 上不能当兜底**：`/usr/bin/open -> /etc/alternatives/open ->
+/usr/bin/run-mailcap`，同一个 `mime-support` 包还给了 `/usr/bin/edit` / `see` /
+`view`。run-mailcap 吃的是文件不是链接 —— 实测：
+
+```bash
+$ run-mailcap --norun https://example.com/
+Warning: unknown mime-type for "https://example.com/" -- using "application/octet-stream"
+Error: no such file "https://example.com/"        # 退出 2
+```
+
+所以 Linux 的兜底只留 xdg-open（本机恰好没装，于是 `--open` 在这台机器上没有
+系统浏览器可退：没有窗口时会直接报错退出，而不是去 exec 一个必错的 run-mailcap）。
 
 **BROWSER 写的是自己时跳过**（`SELF_NAMES`）：`BROWSER='edit --open'` 又正好没有窗口
 可直连时，会一路 exec 回自己 —— exec 是换进程、不是 fork 炸弹，但同样一圈接一圈停不下来。
@@ -435,6 +448,31 @@ exec 上一层目录里的 `node`）—— 和"窗口发现"里认 socket 用的
 所以置前是**客户端 / 窗口管理器**层面的事（remote 下请求还是从隧道过来的），
 服务器这边没法通过这条 socket 左右，官方 CLI 同款行为。要那个窗口到前面来，
 只能自己点过去。
+
+### 名字：Debian 自带 `/usr/bin/edit`（run-mailcap 的别名）
+
+`mime-support` 包里有 `/usr/bin/edit -> run-mailcap`（同族还有 `see` / `view` /
+`compose` / `print`，`open` 也是它的 alternative）。所以 `edit` 这个名字不是空的：
+
+```bash
+$ command -v edit                       # 当前 shell：dotfiles 把 ~/.local/bin 放在前面
+/home/dongjq/.local/bin/edit
+$ env -i sh -lc 'command -v edit'       # 不加载 dotfiles 的登录 shell
+/usr/bin/edit
+```
+
+什么时候会撞：不加载 dotfiles 的 shell、`sudo` / `cron`、没放软链的机器。撞了就是
+run-mailcap 的 edit 动作 —— 它按 mime 类型处理**文件**，本机 `/etc/mailcap` 里
+`text/plain` 没有 edit 规则：
+
+```bash
+$ run-mailcap --norun --action=edit /tmp/a.txt
+Error: no "edit" rule for type "text/plain" passed its test case      # 退出非 0
+```
+
+不会静默做错事，但也打不开文件（`text/html` 倒是有规则：走 `sensible-browser`）。
+改名（比如 `iedit` / `e`）的成本在 dotfiles 与 `$EDITOR`；不改名就是把
+`~/.local/bin` 稳稳压在 `/usr/bin` 前面，并接受"换台机器 `edit` 可能不是它"。
 
 ## 窗口发现与 workspace
 

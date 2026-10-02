@@ -191,8 +191,13 @@ for i in ('emacs', 'emacsclient'):       # 当 $EDITOR 用的是后者
 #   $BROWSER   : BROWSER 可带参数，链接追加在后（fish 的 help 就是这么拼的）
 
 
-# $BROWSER 没设、或设的是自己时的兜底：Linux 桌面是 xdg-open，macOS 是 open
-OPENERS = ('xdg-open', 'open')
+# $BROWSER 没设、或设的是自己时的兜底：Linux 桌面是 xdg-open，macOS 是 open。
+# Linux 上不能拿 open 兜底：Debian 系（含本机）的 /usr/bin/open 是 run-mailcap 的
+# alternative，而 run-mailcap 吃的是**文件**不是链接 —— 实测 run-mailcap
+# https://example.com/ 判不出 mime（application/octet-stream）再报 no such file，
+# 退出 2。反过来 macOS 也没有 xdg-open（它是 Linux 桌面 xdg-utils 里的命令，除非
+# brew 装过），所以两边各留自己那个
+OPENERS = ('open',) if sys.platform == 'darwin' else ('xdg-open',)
 
 
 def current_socket():
