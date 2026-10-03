@@ -1780,19 +1780,23 @@ def cli_argv(args: list[str], kind: str | None) -> list[str]:
     return to_argv(normalize(args), kind)
 
 
-# 失败时给用户看的那一句"为什么"。errno 只在 --debug 里看得见，所以提示必须自带
-# 信息量 —— "连不上"三个字谁也看不出下一步该干什么。
+# 失败时给用户看的那一句"为什么"。errno 只在 --debug 里看得见，HTTP 码只在回复头里，
+# 所以提示必须自带信息量 —— "连不上"三个字、或者一个光秃秃的 500，谁也看不出下一步。
 #
-# **目前只收 errno（socket 层）**：查它的地方只有 socket_reply 里 isinstance(raw, OSError)
-# 那一支。另一支 refused（404 / 500）的"为什么"来自服务端原话（`Unknown message type: …`），
-# 还没进这张表 —— 要进的话键是 HTTP 码，与 errno 不会撞（errno < 134，HTTP >= 100），
-# 但两类 int 键混在一张表里读到时要留意来路，所以先不加。
-WHY_FAILED = {
-    errno.ENOENT: 'socket 路径没了（窗口刚关？）',
-    errno.ECONNREFUSED: 'socket 文件还在但没人听（窗口已退出、文件没删）',
-    errno.ETIMEDOUT: '超时（窗口卡住，或它已经收到请求、只是回包慢）',
-    errno.EACCES: '没有权限连这个 socket',
-    errno.EPIPE: '连上就断了（窗口正在退出）',
+# 两类失败共用这张表，**键一律用字符串**：socket 层是 errno 名（`'ENOENT'`），业务层是
+# HTTP 状态码（`'404'`）。用字符串而不是两套 int，两类键就不会在一个字面量里混成
+# "这些 int 都是什么"；`str` 键也顺带让 socket_reply 那两个分支的查法一样直白。
+# 表里没有的键走各自的兜底（`strerror` / 服务端原话），所以这里是"加话"，不是"白名单"。
+WHY_FAILED: dict[str, str] = {
+    # socket 层（socket_reply 里 isinstance(raw, OSError) 那一支）
+    'ENOENT': 'socket 路径没了（窗口刚关？）',
+    'ECONNREFUSED': 'socket 文件还在但没人听（窗口已退出、文件没删）',
+    'ETIMEDOUT': '超时（窗口卡住，或它已经收到请求、只是回包慢）',
+    'EACCES': '没有权限连这个 socket',
+    'EPIPE': '连上就断了（窗口正在退出）',
+    # 业务层（非 200 那一支）：具体是什么错由服务端原话补，这句只给"下一步"
+    '404': '多半是窗口版本与 edit 的报文不匹配，换个窗口或升一下试试',
+    '500': '窗口处理报文时崩了，它自己的日志里有堆栈',
 }
 
 
@@ -1828,7 +1832,9 @@ def socket_reply(sock, msg, timeout=3.0):
     raw = _request(sock, msg, timeout)
 
     if isinstance(raw, OSError):
-        known = WHY_FAILED.get(raw.errno or 0)
+        # 键是 errno **名**：平台没有的 errno（errorcode 里没有）就查不到，
+        # 落回 strerror —— 这张表是"加话"，不是白名单
+        known = WHY_FAILED.get(errno.errorcode.get(raw.errno or 0, ''))
 
         return Reply(False, 'unreachable', '%s（%s）' % (
             sock, known or raw.strerror or str(raw)))
@@ -1844,15 +1850,24 @@ def socket_reply(sock, msg, timeout=3.0):
         return Reply(False, 'unreachable',
                      '%s（连上了却没回出完整回复，窗口正在退出？）' % sock)
 
-    return Reply(False, 'refused',
-                 http_body(raw).strip() or 'HTTP %s（回复没正文）' % code)
+    # 被拒：服务端原话（"Unknown message type: open" 之类）当主体，WHY_FAILED 补"下一步"。
+    # 表里没有的码给通用的一句 —— 于是**每条 refused 消息都自带下一步**，
+    # reply_failure 那侧就只做框定，不用再猜这个码该怎么办
+    body = http_body(raw).strip()
+    detail = 'HTTP %s%s' % (code, '（%s）' % body if body else '')
+    why = WHY_FAILED.get(str(code), '换个窗口或升一下试试')
+
+    return Reply(False, 'refused', '%s —— %s' % (detail, why))
 
 
 def reply_failure(reply):
     """把两种失败说成一句能照做的提示（这两种情况 edit 退不出去，也不再试）
 
-    >>> reply_failure(Reply(False, 'refused', 'Unknown message type: open')).startswith(
-    ...     '窗口不认这条报文（Unknown')
+    "为什么"与"该往哪看"都已经在 detail 里了（socket 层是 errno 人话，refused 是服务端
+    原话 + WHY_FAILED 补的那句），这里只负责点明**这个结论意味着什么类别的问题**。
+
+    >>> reply_failure(Reply(False, 'refused', 'HTTP 500（boom）—— 崩了')).startswith(
+    ...     '窗口不认这条报文（HTTP 500')
     True
     >>> reply_failure(Reply(False, 'unreachable', '/run/x.sock（路径没了）')).startswith(
     ...     '窗口 socket 连不上')
@@ -1860,8 +1875,7 @@ def reply_failure(reply):
     """
 
     if reply.reason == 'refused':
-        return ('窗口不认这条报文（%s）—— 不是 socket 的问题：多半是窗口版本与 edit '
-                '的报文不匹配，换个窗口或升一下试试' % reply.detail)
+        return '窗口不认这条报文（%s）—— 不是 socket 的问题' % reply.detail
 
     return ('窗口 socket 连不上（%s）—— 窗口可能刚关；edit --list 看还在的窗口，'
             'edit --interactive 挑一个' % reply.detail)

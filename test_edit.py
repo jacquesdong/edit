@@ -809,9 +809,10 @@ class ReplyTest(EditCase):
     def test_refused_with_code_cli_exits(self):
         """被拒 + code 系 CLI：同一个 socket 必然再失败一次，不该白起 node"""
 
-        for code, body in ((404, 'Unknown message type: open'),
-                           (500, 'Error while processing pipe request'),
-                           (404, '')):                       # 没正文也别只报个数字
+        for code, body, why in ((404, 'Unknown message type: open', '版本'),
+                                (500, 'Error while processing pipe request', '日志'),
+                                (404, '', '版本'),            # 没正文也别只报个数字
+                                (403, 'nope', '换个窗口')):   # 表里没有的码走通用句
             with self.subTest(code):
                 if os.path.exists(self.cli_out):
                     os.unlink(self.cli_out)         # 上一次 subTest 的记录不算
@@ -822,7 +823,8 @@ class ReplyTest(EditCase):
 
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn('窗口不认这条报文', proc.stderr)
-                self.assertIn('版本', proc.stderr)
+                self.assertIn('HTTP %s' % code, proc.stderr)
+                self.assertIn(why, proc.stderr)
                 self.assertIsNone(self.cli_args(), '不该交给 CLI')
 
     def test_refused_keeps_the_body_text(self):
