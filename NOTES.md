@@ -45,8 +45,15 @@ Content-Length: 189
 `Unable to connect to IDE server: …` + `process.exit(1)`；业务层是**回 HTTP 状态码** ——
 未知 `type` 给 **404**（`Unknown message type: …`）、handler 抛异常给 **500**、坏 JSON 也算
 失败，而 CLI 那边只是 `.catch` 里 `console.error("Error when invoking the open command: …")`，
-**退出码仍是 0**。我们把两档合成一个 `None`（`socket_request`），再由调用点退 CLI 兜底 ——
-判据一致，策略不同。
+**退出码仍是 0**。
+
+**上游那两档退出码不合理，别学**：同一个函数对"请求没成"给了两个答案；404 明明是用法
+错误（你发了服务端不认的 type）、500 是服务端崩了，都该非 0 —— `code f` 崩在服务端、
+stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解释"别报成功"，解释不了"报 0"。
+**这条会传染给 edit**：`os.execv` 是整个替换进程，CLI 的退出码就是 edit 的。已出现的例子：
+`edit --wait somedir/` 曾经落进 CLI、由它打印 `At least one file must be provided to wait for.`
+然后 **exit 0** —— 而 `edit -a`（空目标）是 edit 自己 `sys.exit` → 1。同类错误两种退出码。
+**edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）。
 
 **服务端会把 URI 重新分类**（`server-main.js` 的 `open()`）：`fileURIs` 逐个过
 `sU()` —— 判据就是**扩展名** `.code-workspace`（`b5 = ".code-workspace"`，纯路径判定不看
@@ -54,6 +61,41 @@ Content-Length: 189
 所以 `.code-workspace` 无论我们放哪个字段，最终都按"打开工作区"走（`edit` 传达不了"我要把
 这个 workspace 当普通文件打开"这个意图）。顺带它还会推断
 `preferNewWindow: !reuse && !wait && !add && !remove`。
+
+### 直连失败了还要不要退 CLI：按"换不换通道"判，不按"失败了就退"判
+
+退路和失败**得配对** —— CLI 走的是同一个 `$VSCODE_IPC_HOOK_CLI`、同一份报文，**同一通道**，
+所以对同一类失败它必然再失败一次。三态（`Reply`）+ 三种动作：
+
+| 结局 | 判据 | code 系 CLI | vim / `$EDITOR` 系 |
+| --- | --- | --- | --- |
+| 成功 | HTTP 200 | 干活 | — |
+| **被拒** `refused` | 404 / 500 / 坏正文 | **退出**并说原因（窗口活着但不认这条报文，换个 code 系 CLI 也是同一个服务端） | 交回那个编辑器（**另一个通道**），先打一行说明为什么退 |
+| **连不上** `unreachable` | connect 失败，**或**回复连 HTTP 头都没有（`http_code` 为 0 —— silent 窗口就是这种） | 同上 | 同上 |
+
+`--open` 单独一档：窗口失败时**跳过 code 系 CLI 的 `--openExternal`**（同一 socket，白起
+node），直落 `$BROWSER` / `xdg-open` —— 系统浏览器是另一个通道、不依赖窗口，而 `--open`
+本来就是"把链接交给系统浏览器"的意思。两者都没有才退出。
+
+**为什么不换窗口重试**（试过，结论是不做）：`_request` 失败可能是"根本没发出去"（connect
+阶段 ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）—— 后者重发
+会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页）。那不是浪费，是**有副作用
+的重试**。要安全重试得先能区分这两段（connect 与 send/recv 分开报），而窄收益不值：残留
+socket 本来就进不了候选（`load_sockets()` 只认 `/proc/net/unix` 里还 bind 着的），剩下的
+只有"列完到发之间窗口刚好死"这种竞态。
+
+**错误要自带信息量**：errno 只在 `--debug` 里看得见，所以提示里要写人话 —— "socket 路径没了
+（窗口刚关？）" / "socket 文件还在但没人听（窗口已退出、文件没删）" / "连上了却没回出完整
+回复，窗口正在退出？"，而不是旧那句"socket 打不开（…），改用 CLI"（它把 404 也说成 socket
+问题，把人引到权限/重连上去查）。
+
+**`$BROWSER` 不一定是"另一个通道"**（实测，2026-10-03）：这台机器上
+`BROWSER=/…/codebuddy-server-cn/bin/stable-…/bin/helpers/browser.sh` —— IDE 自己装的那份
+`browser.sh`，内部还是 `server-cli.js` → **同一个 socket**。所以"窗口失败就退 `$BROWSER`"
+在装了 VS Code / CodeBuddy 的机器上可能只是把同一个失败换个进程再犯一遍（本机实测：退过去
+之后 node 报 `Unable to connect to IDE server: … ENOENT`，退出 1）。跟 `SELF_NAMES` 同一类
+问题：**认出是自己人就别回退给自己**。`find_browser()` 现在还没滤这一条（`OPENERS` 里只有
+`xdg-open`，本机没装），待办见下面"还没做"。
 
 ### 工作区文件（`.code-workspace`）：协议能表达，四种语义不认
 

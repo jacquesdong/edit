@@ -738,22 +738,42 @@ class DryRunTest(EditCase):
 
 
 class FallbackTest(EditCase):
-    """socket 不行时回退 CLI"""
+    """socket 不行时：换个通道（$EDITOR 那种 CLI）或者干脆退出"""
 
-    def assert_fell_back(self, proc):
-        self.assertIn('socket 打不开', proc.stderr)
+    def assert_fell_back(self, proc, why):
+        self.assertIn(why, proc.stderr)                 # 说清为什么没直连
+        self.assertIn('改用', proc.stderr)
         self.assertEqual(proc.returncode, 7)            # 假 CLI 的退出码
         self.assertEqual(self.cli_args(), self.a)       # 假 CLI 真被调用了
 
     def test_http_500(self):
         self.win = self.add_window(code=500, body='boom')
 
-        self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
+        self.assert_fell_back(self.run_edit(self.a, hook=self.win.path),
+                              '窗口不认这条报文')
 
     def test_window_closes(self):
         self.win = self.add_window(silent=True)
 
-        self.assert_fell_back(self.run_edit(self.a, hook=self.win.path))
+        self.assert_fell_back(self.run_edit(self.a, hook=self.win.path),
+                              '窗口 socket 连不上')
+
+    def test_code_cli_is_not_a_fallback(self):
+        """code 系 CLI 走同一个 socket：不是"换通道"，所以不兜底、如实退出"""
+
+        cli = os.path.join(self.dir, 'buddycn')
+
+        with open(cli, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_CLI_OUT"\nexit 7\n')
+
+        os.chmod(cli, 0o755)
+
+        win = self.add_window(code=500, body='boom')
+        proc = self.run_edit(self.a, hook=win.path, extra_env={'EDIT_CLI': cli})
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('窗口不认这条报文', proc.stderr)
+        self.assertIsNone(self.cli_args(), '不该起 node')
 
     def test_untranslatable_args(self):
         """--wait / 取值不够的 --merge / 无参数 / 没有 socket：一律交给 CLI"""
@@ -763,7 +783,120 @@ class FallbackTest(EditCase):
                 proc = self.run_edit(*args)
 
                 self.assertEqual(proc.returncode, 7, proc.stderr)
-                self.assertNotIn('socket 打不开', proc.stderr)
+                self.assertNotIn('改用', proc.stderr)   # 没失败过，不用解释
+
+
+class ReplyTest(EditCase):
+    """三态结局：成功 / 被拒（404、500）/ 连不上
+
+    后两种先说清原因，再按"换不换通道"决定：code 系 CLI 走的是同一个 socket（不兜底、
+    直接退出），$EDITOR 那种 vim / nano 是另一个通道（照旧交回去）。见 reply_failure。
+    """
+
+    def code_cli(self):
+        """假 CLI 改名 buddycn：cli_kind 判成 code 系（同一条 socket）"""
+
+        path = os.path.join(self.dir, 'buddycn')
+
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_CLI_OUT"\nexit 7\n')
+
+        os.chmod(path, 0o755)
+        self.fake_cli = path
+
+        return path
+
+    def test_refused_with_code_cli_exits(self):
+        """被拒 + code 系 CLI：同一个 socket 必然再失败一次，不该白起 node"""
+
+        for code, body in ((404, 'Unknown message type: open'),
+                           (500, 'Error while processing pipe request'),
+                           (404, '')):                       # 没正文也别只报个数字
+            with self.subTest(code):
+                if os.path.exists(self.cli_out):
+                    os.unlink(self.cli_out)         # 上一次 subTest 的记录不算
+
+                self.code_cli()
+                win = self.add_window(code=code, body=body)
+                proc = self.run_edit(self.a, hook=win.path)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('窗口不认这条报文', proc.stderr)
+                self.assertIn('版本', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_refused_keeps_the_body_text(self):
+        self.code_cli()
+        win = self.add_window(code=404, body='Unknown message type: open')
+        proc = self.run_edit(self.a, hook=win.path)
+
+        self.assertIn('Unknown message type: open', proc.stderr)
+
+    def test_refused_with_plain_cli_falls_back(self):
+        """被拒 + $EDITOR 那种 CLI：换个通道还有救，交回去并说清为什么"""
+
+        win = self.add_window(code=500, body='boom')
+        proc = self.run_edit(self.a, hook=win.path)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIn('窗口不认这条报文', proc.stderr)
+        self.assertIn('改用', proc.stderr)
+        self.assertEqual(self.cli_args(), self.a)
+
+    def test_unreachable_with_code_cli_exits(self):
+        """连不上：说 errno 和下一步，别只说"连不上"（hook 指向死路径那种）"""
+
+        self.code_cli()
+        proc = self.run_edit(self.a, hook=os.path.join(self.dir, 'gone.sock'))
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('窗口 socket 连不上', proc.stderr)
+        self.assertIn('路径没了', proc.stderr)
+        self.assertIn('edit --list', proc.stderr)
+        self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_silent_window_is_unreachable_not_refused(self):
+        """连上就断（silent）：回复连 HTTP 头都没有 —— 归"连不上"，不是"被拒"，
+        提示不能指向"版本不匹配"（实测踩过：空回复的 http_code 是 0）"""
+
+        self.code_cli()
+        win = self.add_window(silent=True)
+        proc = self.run_edit(self.a, hook=win.path)
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('窗口 socket 连不上', proc.stderr)
+        self.assertIn('连上了却没回出完整回复', proc.stderr)
+        self.assertNotIn('版本', proc.stderr)
+
+    def test_unreachable_with_plain_cli_falls_back(self):
+        win = self.add_window(silent=True)
+        proc = self.run_edit(self.a, hook=win.path)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIn('窗口 socket 连不上', proc.stderr)
+        self.assertEqual(self.cli_args(), self.a)
+
+    def test_no_hook_still_falls_back_silently(self):
+        """对照：压根没有 hook（sock 为 None）交回 CLI，但一个字都不多打
+        （git commit 的 stderr 不能被污染）"""
+
+        proc = self.run_edit(self.a)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertEqual(proc.stderr, '')
+        self.assertIsNotNone(self.cli_args())
+
+    def test_wait_marker_is_cleaned_up_on_failure(self):
+        """--wait 失败退出前先收掉临时 marker，别在 /tmp 留垃圾"""
+
+        self.code_cli()
+        win = self.add_window(code=500, body='boom')
+        before = set(os.listdir('/tmp'))
+        proc = self.run_edit('--wait', self.a, hook=win.path)
+        after = set(os.listdir('/tmp'))
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(sorted(after - before), [])
 
 
 class NoTargetTest(EditCase):
@@ -1478,16 +1611,33 @@ class OpenExternalTest(ProcCase):
                          {'type': 'openExternal', 'uris': [self.URL]})
         self.assertEqual(self.win.requests, [], '--dry-run 不该真发')
 
-    def test_window_500_falls_back_to_code_cli(self):
-        """窗口不收：退回 code 系 CLI 的 --openExternal（IDE 的 browser.sh 就是这么调的）"""
+    def test_window_500_skips_code_cli_uses_browser(self):
+        """窗口 500：跳过 code 系 CLI（同一个 socket，必然再 500，白起一次 node），
+        直落系统浏览器 —— 那是另一个通道，不依赖窗口"""
 
         self.code_cli()
-        self.win = self.add_window(code=500, body='boom')
-        proc = self.run_edit('--open', self.URL, hook=self.win.path)
+        browser = self._script('my-browser')
+        win = self.add_window(code=500, body='boom')
+        proc = self.run_edit('--open', self.URL, hook=win.path,
+                             extra_env={'BROWSER': browser})
 
         self.assertEqual(proc.returncode, 7, proc.stderr)
-        self.assertIn('socket 打不开', proc.stderr)
-        self.assertEqual(self.cli_args(), '--openExternal ' + self.URL)
+        self.assertIn('窗口不认这条报文', proc.stderr)
+        self.assertIn('改用系统浏览器', proc.stderr)
+        self.assertEqual(self.cli_args(), self.URL)
+
+    def test_window_gone_without_browser_exits(self):
+        """窗口没了、BROWSER 与兜底都没有：退出并说清是窗口这条路不通"""
+
+        self.code_cli()
+
+        with patch.object(edit, 'OPENERS', ()):
+            out, _, code = self.run_main('--open', self.URL,
+                                         extra_env={'BROWSER': ''},
+                                         hook=self.add_window(silent=True).path)
+
+        self.assertIn('没有 IDE 窗口', str(code))
+        self.assertEqual(out, '')
 
     def test_falls_back_to_browser(self):
         """没有窗口、CLI 也不是 code 系（假 CLI 谁都不认）：走 $BROWSER"""
@@ -1630,9 +1780,9 @@ class InteractiveOpenTest(ProcCase):
             seen['sock'] = sock
             seen['hook'] = os.environ.get(edit.IPC_HOOK)
 
-            return True, '{}'
+            return edit.Reply(True, '', '')
 
-        with patch.object(edit, 'socket_open', spy):
+        with patch.object(edit, 'socket_reply', spy):
             _, _, code = self.run_main('--interactive', self.a, answer='2')
 
         self.assertEqual(code, 0)

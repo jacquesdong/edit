@@ -104,6 +104,7 @@ remote-cli 一模一样（它也是 createWaitMarkerFile + 每秒 existsSync 轮
 from __future__ import annotations       # 注解不求值：别名放哪都行，运行期也不构造它们
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -945,17 +946,13 @@ def parse_status(text):
 
     return m.group(1), m.group(2).strip() or None
 
-def socket_request(sock, msg, timeout=1.5):
-    """往窗口 socket 发一次请求，返回原始 HTTP 回复；失败返回 None
+def _request(sock, msg, timeout):
+    """发一次请求，返回回复字节；失败**返回那个 OSError**（不当场处理）
 
-    协议就是 remote-cli 自己那套：POST / + JSON，回复是 chunked。连不上 / 超时
-    一律返回 None 且不抛异常。
+    分层是为了让调用方选精度：探活只要"成没成"（`socket_status`），发 open 的还要分
+    "连不上"和"连上了但被拒"（`socket_reply`）。
 
-    失败原因（路径没了 / 被拒 / 超时）走 logging.debug：调用方只拿到一个 None，
-    想区分是哪种就得 --debug / EDIT_DEBUG=1 把 errno 打出来。socket_status 与
-    socket_open 都从这儿过，所以一处埋点就够。
-
-    >>> socket_request('/no-such.sock', {'type': 'status'}, timeout=0.1) is None
+    >>> isinstance(_request('/no-such.sock', {'type': 'status'}, timeout=0.1), OSError)
     True
     """
 
@@ -982,9 +979,26 @@ def socket_request(sock, msg, timeout=1.5):
                 total += len(data)
     except OSError as e:
         logger.debug('socket %s: request failed, %r', sock, e, exc_info=True)
-        return None
+        return e
 
     return b''.join(chunks)
+
+
+def socket_request(sock, msg, timeout=1.5):
+    """往窗口 socket 发一次请求，返回原始 HTTP 回复；失败返回 None
+
+    协议就是 remote-cli 自己那套：POST / + JSON，回复是 chunked。连不上 / 超时
+    一律返回 None 且不抛异常 —— 探活（`socket_status`）只要"成没成"，失败原因
+    （路径没了 / 被拒 / 超时）走 logging.debug：想看就得 --debug / EDIT_DEBUG=1。
+    要区分失败种类的走 `socket_reply`。
+
+    >>> socket_request('/no-such.sock', {'type': 'status'}, timeout=0.1) is None
+    True
+    """
+
+    reply = _request(sock, msg, timeout)
+
+    return None if isinstance(reply, OSError) else reply
 
 def http_code(raw):
     """HTTP 回复的状态码；解不出来返回 0
@@ -1766,21 +1780,91 @@ def cli_argv(args: list[str], kind: str | None) -> list[str]:
     return to_argv(normalize(args), kind)
 
 
-def socket_open(sock, msg, timeout=3.0):
-    """把 open 报文发给窗口，返回 (ok, 详情)
+# 失败时给用户看的那一句"为什么"。errno 只在 --debug 里看得见，所以提示必须自带
+# 信息量 —— "连不上"三个字谁也看不出下一步该干什么。
+#
+# **目前只收 errno（socket 层）**：查它的地方只有 socket_reply 里 isinstance(raw, OSError)
+# 那一支。另一支 refused（404 / 500）的"为什么"来自服务端原话（`Unknown message type: …`），
+# 还没进这张表 —— 要进的话键是 HTTP 码，与 errno 不会撞（errno < 134，HTTP >= 100），
+# 但两类 int 键混在一张表里读到时要留意来路，所以先不加。
+WHY_FAILED = {
+    errno.ENOENT: 'socket 路径没了（窗口刚关？）',
+    errno.ECONNREFUSED: 'socket 文件还在但没人听（窗口已退出、文件没删）',
+    errno.ETIMEDOUT: '超时（窗口卡住，或它已经收到请求、只是回包慢）',
+    errno.EACCES: '没有权限连这个 socket',
+    errno.EPIPE: '连上就断了（窗口正在退出）',
+}
 
-    判据和 CLI 一致：只认 HTTP 200（CLI 就是 JSON.parse 之后看 statusCode）。
-    详情是回复正文，失败时正好拿来当错误信息。
+
+class Reply(NamedTuple):
+    """一次 open / openExternal 请求的结局：成功 / 被拒 / 连不上
+
+    分三态而不是 `(ok, detail)`：两种失败的**该做的动作不一样**，两态逼着调用方一律
+    "改用 CLI"—— 而 CLI 走的是同一个 socket、同一份报文，注定再失败一次（`--wait`
+    还白搭一次进程、把 marker 收回来重造）。所以两态都直接退出，把原因说清楚。
+
+    **为什么不重试另一个窗口**：`_request` 失败可能是"根本没发出去"（connect 阶段
+    ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）——
+    后者重发会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页），
+    那不是浪费，是有副作用的重试。要安全重试，得先能区分这两段（把 connect 与
+    send/recv 分开报），那是另一个改法，先不换窗口。
     """
 
-    raw = socket_request(sock, msg, timeout)
-    if not raw:
-        return False, '连不上或超时'
+    ok: bool
+    reason: str          # '' | 'refused' | 'unreachable'
+    detail: str          # 服务端原话 / errno 说法，给人看
+
+
+def socket_reply(sock, msg, timeout=3.0):
+    """把 open / openExternal 发出去，回报三态结局（不抛异常）
+
+    判据与 CLI 一致：只认 HTTP 200（`server-cli.js` 就是 JSON.parse 之后看
+    statusCode）；404 / 500 / 坏 JSON 都算"被拒"。
+
+    >>> socket_reply('/no-such.sock', {'type': 'open'}, timeout=0.1).reason
+    'unreachable'
+    """
+
+    raw = _request(sock, msg, timeout)
+
+    if isinstance(raw, OSError):
+        known = WHY_FAILED.get(raw.errno or 0)
+
+        return Reply(False, 'unreachable', '%s（%s）' % (
+            sock, known or raw.strerror or str(raw)))
 
     code = http_code(raw)
-    body = http_body(raw).strip()
 
-    return code == 200, body or ('HTTP %s' % code)
+    if code == 200:
+        return Reply(True, '', '')
+
+    if code == 0:
+        # 连上了却没回出 HTTP 头（silent 窗口 accept 完立刻断就是这种）：不是"被拒"，
+        # 是通道这一侧已经没了 —— 归到 unreachable，别让提示指向"版本不匹配"
+        return Reply(False, 'unreachable',
+                     '%s（连上了却没回出完整回复，窗口正在退出？）' % sock)
+
+    return Reply(False, 'refused',
+                 http_body(raw).strip() or 'HTTP %s（回复没正文）' % code)
+
+
+def reply_failure(reply):
+    """把两种失败说成一句能照做的提示（这两种情况 edit 退不出去，也不再试）
+
+    >>> reply_failure(Reply(False, 'refused', 'Unknown message type: open')).startswith(
+    ...     '窗口不认这条报文（Unknown')
+    True
+    >>> reply_failure(Reply(False, 'unreachable', '/run/x.sock（路径没了）')).startswith(
+    ...     '窗口 socket 连不上')
+    True
+    """
+
+    if reply.reason == 'refused':
+        return ('窗口不认这条报文（%s）—— 不是 socket 的问题：多半是窗口版本与 edit '
+                '的报文不匹配，换个窗口或升一下试试' % reply.detail)
+
+    return ('窗口 socket 连不上（%s）—— 窗口可能刚关；edit --list 看还在的窗口，'
+            'edit --interactive 挑一个' % reply.detail)
 
 def probe_workspaces(socks, timeout=1.5):
     """并发问每个候选窗口要一次 status，把 authority / workspace 填进候选
@@ -2334,6 +2418,7 @@ def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
     """
 
     msg = open_external_msg(uris)
+    window_failed = False               # 窗口那条路失败了吗（失败就跳过 code 系 CLI）
 
     if sock:
         req = 'socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False))
@@ -2343,13 +2428,18 @@ def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
             return
 
         logger.debug('%s', req)
-        ok, detail = socket_open(sock, msg)
+        reply = socket_reply(sock, msg)
 
-        if ok:
+        if reply.ok:
             return
 
-        sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
-        why_cli = 'socket 打不开（%s）' % detail
+        # 窗口这条路不通：说清原因，然后**跳过 code 系 CLI 那一级**（它是同一个 socket，
+        # 必然再失败一次，只白起一次 node），直接落系统浏览器 —— 那是另一个通道，
+        # 不依赖窗口，`--open` 本来就是"把链接交给系统浏览器"的意思
+        sys.stderr.write('edit --open: %s\n' % reply_failure(reply))
+        sys.stderr.write('edit --open: 改用系统浏览器\n')
+        why_cli = reply_failure(reply)
+        window_failed = True
 
     cli = find_cli()
     kind = cli_kind(cli[0]) if cli else None
@@ -2357,7 +2447,7 @@ def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
     # code 系自己就有 --openExternal（和直连是同一件事，只是要起一次 node）；
     # 别的 CLI（vim / $EDITOR…）没有这个概念，那就退回系统浏览器 —— 链接不需要
     # 按 kind 翻译，原样追加在后面就行
-    if cli and kind == CLI_KIND_CODE:
+    if cli and kind == CLI_KIND_CODE and not window_failed:
         if why_cli and have_remote_cli(os.path.dirname(cli[0])):
             sys.stderr.write(hint_remote_cli(why_cli))
 
@@ -2633,6 +2723,7 @@ def main():
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
     marker = make_marker() if sock and has_wait(tokens) else None
     msg = to_msg(tokens, marker) if sock else None
+    failed = None                        # 直连发失败的 Reply（None = 没发/没失败）
 
     if sock and msg is None:
         logger.debug('cannot build socket request, falling back to cli')
@@ -2646,20 +2737,32 @@ def main():
             return
 
         logger.debug('%s', req)         # 真发出去的那一份，和 --dry-run 打的是同一个串
-        ok, detail = socket_open(sock, msg)
+        reply = socket_reply(sock, msg)
 
-        if ok:
+        if reply.ok:
             if marker:
                 wait_marker(marker)     # 等窗口删 marker（= 等文件被关掉）
             return
 
-        sys.stderr.write('edit: socket 打不开（%s），改用 CLI\n' % detail)
-        why_cli = 'socket 打不开（%s）' % detail
+        # 失败了。先把临时 marker 收掉（CLI 自己会造一个），退不退交给下面按 kind 判
+        remove_marker(marker)
+        failed = reply
 
     # 走到这儿是要交回 CLI 了：它自己会造 marker，我们这个得收回去
     remove_marker(marker)
 
     cli = find_cli()
+
+    if failed is not None:
+        # **code 系 CLI 走的是同一个 socket、同一份报文**，必然再失败一次 —— 不该白起
+        # 一次 node，更不该用一句 CLI 的退出码盖掉真正的原因。换个**通道**还有救：
+        # $EDITOR 配的 vim / nano 不依赖窗口，那种交回去仍然有意义（老行为）。
+        if cli is None or cli_kind(cli[0]) == CLI_KIND_CODE:
+            sys.exit('edit: %s' % reply_failure(failed))
+
+        sys.stderr.write('edit: %s；改用 %s\n' % (reply_failure(failed), cli[0]))
+        why_cli = reply_failure(failed)
+
     if not cli:
         sys.exit('找不到 cli（%s）' % ' / '.join(CODE_LIKE + VIM_LIKE))
 
