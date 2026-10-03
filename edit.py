@@ -1215,7 +1215,11 @@ def has_wait(tokens: list[Token]) -> bool:
     False
     """
 
-    return any(t[0] == 'opt' and t[2] == 'wait' for t in tokens)
+    for t in tokens:
+        match t:
+            case ('opt', _, 'wait', _):
+                return True
+    return False
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
 WAIT_MARKER_INTERVAL = 1.0
@@ -1341,32 +1345,45 @@ def open_request(args, marker=None):
     return to_msg(normalize(args), marker)
 
 
-def nothing_to_open(tokens):
-    """一个"要打开的东西"都没有：没有文件 / 目录 / 跳转目标，也没有 -m 那类带取值的选项
+def action_but_no_target(tokens):
+    """NEEDS_TARGET 里的选项（--wait / -a / -d）出现、却没有任何可开的目标（file /
+    folder / goto / other / 带取值的选项）时，返回 (True, 这些选项实际敲的 flag)，否则
+    (False, None)。与 wait_but_no_file / add_but_no_dir 同构：都是"误用检测器"，main 里
+    统一用 `misuse, detail = 检测器(tokens); if misuse:` 调。
 
-    认不出来的 token（('other', …)）算"有东西"—— 它们会原样交给 CLI 去理解，没法断定
-    用户没给目标（`--` 之后的字面量就在里面）。main 拿它配 NEEDS_TARGET 用。
+    认不出的 token（('other', …)）算"有东西"，-- 之后的字面量也在其中；-m 那类带取值的
+    选项也算有目标。空着（连 other 都没有）且没给 NEEDS_TARGET 选项，不在这里报。
 
-    >>> nothing_to_open(normalize(['-d']))
-    True
-    >>> nothing_to_open(normalize([]))
-    True
-    >>> nothing_to_open(normalize(['-d', 'a.txt']))
-    False
-    >>> nothing_to_open(normalize(['-m', 'a', 'b', 'base', 'res']))   # 取值就是路径
-    False
-    >>> nothing_to_open(normalize(['--', 'a.txt']))                   # 认不出的算有东西
-    False
+    >>> action_but_no_target(normalize(['--wait']))              # NEEDS_TARGET 无目标
+    (True, ['--wait'])
+    >>> action_but_no_target(normalize(['-a', '-d']))             # 多个
+    (True, ['-a', '-d'])
+    >>> action_but_no_target(normalize(['--wait', 'a.txt']))      # 有文件：OK
+    (False, None)
+    >>> action_but_no_target(normalize(['-d', '/tmp']))           # 有目录：OK
+    (False, None)
+    >>> action_but_no_target(normalize(['-m', 'a', 'b', 'base', 'res']))  # 取值算目标
+    (False, None)
+    >>> action_but_no_target(normalize(['--', '--wait']))         # other 算有东西，且 --wait 在 other 里不算
+    (False, None)
     """
 
+    flags = []
+    has_target = False
     for t in tokens:
-        if t[0] == 'other' or t[0] in ('file', 'folder', 'goto'):
-            return False
+        match t:
+            case ('other', _):
+                has_target = True
+            case ('file' | 'folder' | 'goto', _):
+                has_target = True
+            case ('opt', _, _, values) if values:   # 带取值的选项（-m 的 path1..result）
+                has_target = True
+            case ('opt', flag, field, _) if field in NEEDS_TARGET:
+                flags.append(flag)
 
-        if t[0] == 'opt' and t[3]:          # 带取值的选项（-m 的 path1..result）
-            return False
-
-    return True
+    if flags and not has_target:
+        return True, flags
+    return False, None
 
 
 def wait_but_no_file(tokens):
@@ -2690,10 +2707,9 @@ def main():
     # 空着交给 CLI 只会发个空报文，或让 vim 系开个空编辑器。裸调用与 -r / -n 不拦 ——
     # 那些对 code 系是有定义的（开窗口 / 复用窗口 / 新窗口）。放在挑窗口之前，免得
     # --interactive 让用户白挑一次
-    if nothing_to_open(tokens) and any(
-            t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
-        sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
-            t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
+    misuse, target_flags = action_but_no_target(tokens)
+    if misuse:
+        sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(target_flags))
 
     # --wait 等的是"文件编辑器关掉"删 marker：目录没有这一说，marker 没人删
     # wait_marker 会永久挂住；-a 是把目录加进工作区，文件加不进去。给了错类型目标
