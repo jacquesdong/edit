@@ -575,6 +575,38 @@ IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，�
   （后者在没设 TERM 时会得出"能上色"）。
 - **`NO_COLOR` 按规范：设了且非空**才算（`NO_COLOR=` 空串不算关）。
 
+### 两个环境变量的出处：NO_COLOR（2017）与 FORCE_COLOR（2023）
+
+自动检测（`isatty()` + `TERM`）是**猜**，猜错有两个方向，这两个变量各治一个：
+
+- `NO_COLOR` —— 治"猜该上色而用户不想要"。2017 年非正式标准（no-color.org）：
+  程序**默认**上色时应检查 `NO_COLOR`，"present and not an empty string
+  (regardless of its value)" 就不加颜色。
+- `FORCE_COLOR` —— 治"猜不该上色而用户想要"。2023 年才补上（force-color.org），
+  同样是"存在且非空"即强制。动机就是管道：`\| less -R` / grep / tee 会把颜色关掉，
+  CI 里也常被判成非交互；更要紧的是**命令行在这时传不进去** —— 程序内部自己套了
+  管道、或者像 edit 这样被 git 当 `$EDITOR` 调起，没有命令行可改。
+
+规范还明说两件容易想错的事：只管**颜色**，不管 bold / underline / italic（FAQ 3）；
+别拿 `TERM=dumb` 或改终端配色来代替它 —— `NO_COLOR` 是对**软件**的提示，不是对终端
+的能力限制（FAQ 1）。`TERM=dumb` 不属于这两个规范，是更老的 terminfo 传统。
+
+我们对规范有**三处有意偏离 / 选择**，都记在这儿免得以后被"修回规范"：
+
+1. **`FORCE_COLOR` 的取值**：规范原文说"不看值"，任何非空值都强制；但现实里
+   chalk / supports-color 把它当**分级**用（`0`=关、`1`=16 色、`2`=256 色、`3`=真彩），
+   连 no-color.org 的"不支持 `NO_COLOR` 的软件怎么关"那张表里都写着
+   **Chalk: `export FORCE_COLOR=0`**。我们取后者：`0` / `false` 只表示**不强制**
+   （等同没设），不是"强制关闭" —— 要关请用 `NO_COLOR` 或 `--color=never`。
+   代价：`FORCE_COLOR=0` 且这条流是 tty 时我们**仍上色**，而 chalk 会关；
+   `test_force_color_zero_only_means_no_force` 钉的是我们的行为。
+2. **优先级顺序**：force-color.org 的 C 示例把 `FORCE_COLOR` 放在**最后**（连命令行
+   都会被它盖掉）；我们让显式参数 `--color=always|never` 最大。理由是命令行最具体，
+   且 no-color.org FAQ 也说"配置文件与命令行参数应覆盖 `NO_COLOR`"。
+3. **`TERM` 缺失按 `dumb`**（见上）：按 ls / grep 的实测行为，不是规范要求。
+
+这俩变量只归 `should_color` 读（见下节"三层约定"），不进 `ENV_OFF`。
+
 几处边界（都是踩过或能预见的）：
 
 - **`--init` 的片段与喂给 fzf 的候选行永不上色**：片段要被 `source`（转义会进环境
