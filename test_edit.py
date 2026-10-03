@@ -817,6 +817,93 @@ class NoTargetTest(EditCase):
         self.assertNotIn('Traceback', proc.stderr)
 
 
+class WorkspaceTargetTest(EditCase):
+    """.code-workspace 会被服务端改判成"打开工作区"：能开，但行号 / --wait / -d / -m / -a 都不成立"""
+
+    def setUp(self):
+        super().setUp()
+
+        self.ws = self._touch('proj.code-workspace')
+        self.upper = self._touch('Proj.Code-Workspace')       # 上游判据大小写敏感
+        self.absent = os.path.join(self.dir, 'gone.code-workspace')
+
+    def test_wait_on_workspace_exits(self):
+        """--wait + 工作区文件：marker 没人删（wait_marker 无超时），原先是永久挂住"""
+
+        for args in (['--wait', self.ws], ['-w', self.ws], ['--wait', self.absent]):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('工作区文件，等不到"被关掉"', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_goto_on_workspace_exits(self):
+        """:行号 + 工作区文件：窗口会去找"名叫 x.code-workspace:3 的工作区"，打不开"""
+
+        for arg in ('%s:3' % self.ws, '%s:3:5' % self.ws):
+            with self.subTest(arg):
+                proc = self.run_edit(arg)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('工作区文件不支持 :行号', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_diff_merge_add_on_workspace_exit(self):
+        """diff / merge / -a 的目标会被改判成一个工作区，语义静默消失 —— 报错"""
+
+        cases = (['-d', self.a, self.ws], ['--diff', self.ws, self.b],
+                 ['-a', self.ws], ['-m', self.a, self.b, self.ws, self.a])
+
+        for args in cases:
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn('是工作区文件，不能当', proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_add_mode_message_says_directory(self):
+        """-a 缺的是"目录"，提示要说准"""
+
+        proc = self.run_edit('-a', self.ws)
+
+        self.assertIn('加进工作区的目录', proc.stderr)
+
+    def test_plain_open_goes_through(self):
+        """光打开工作区是对的：照直连发，落在 fileURIs 里（服务端改判成 workspaceUri）"""
+
+        msg = self.open_msg(self.ws)
+
+        self.assertEqual(msg['fileURIs'], ['file://' + self.ws])
+        self.assertEqual(msg['folderURIs'], [])
+        self.assertEqual(msg['gotoLineMode'], False)
+
+    def test_uppercase_is_treated_as_a_plain_file(self):
+        """判据照抄上游（extname 严格小写）：.Code-Workspace 是普通文件，不拦"""
+
+        msg = self.open_msg(self.upper)
+
+        self.assertEqual(msg['fileURIs'], ['file://' + self.upper])
+
+    def test_error_comes_before_picking_a_window(self):
+        """和 -a/-d/--wait 空目标同一个位置：--interactive 不该让用户白挑一次"""
+
+        proc = self.run_edit('--interactive', '--wait', self.ws)
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('等不到"被关掉"', proc.stderr)
+        self.assertNotIn('Traceback', proc.stderr)
+
+    def test_wait_on_a_plain_file_still_works(self):
+        """护栏只挑工作区：--wait 跟普通文件照旧走（这里没有窗口，交给 CLI）"""
+
+        proc = self.run_edit('--wait', self.a)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIsNotNone(self.cli_args())
+
+
 def load_fixtures():
     """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）"""
 

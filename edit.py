@@ -1358,6 +1358,110 @@ def nothing_to_open(tokens):
     return True
 
 
+# 服务端会把 fileURIs 里"扩展名是 .code-workspace"的那些**改判**成工作区
+# （server-main.js 的 open()：sU() 判据就是 extname 严格等于 b5 = ".code-workspace"，
+# 纯路径判定不看内容）。所以这类目标照样"能打开"，但打开的是工作区、不是文件编辑器。
+#
+# 别为了"语义正确"把它挪进 folderURIs：folderURIs 一律按文件夹处理、服务端不判，
+# 于是窗口打开一个叫 x.code-workspace 的**空文件夹**，工作区里的 folders/settings 全丢。
+# 放 fileURIs 让服务端改判，是唯一能表达"打开工作区"的入口。
+WORKSPACE_SUFFIX = '.code-workspace'
+
+
+def is_workspace_target(path):
+    """这个目标会不会被服务端改判成"打开工作区"
+
+    判据照抄上游（extname 严格等于小写 `.code-workspace`），所以大小写不同就**不当**
+    工作区 —— 上游那种情况是当普通文件在文本编辑器里打开，我们跟着，别分叉。
+    只看结尾，所以带行号的原样参数（`x.code-workspace:3`）不算：那时行号已经在
+    `parse_goto` 里拆开，判的是拆开后那个路径。
+
+    >>> is_workspace_target('/p/proj.code-workspace')
+    True
+    >>> is_workspace_target('/p/proj.code-workspace:3')
+    False
+    >>> is_workspace_target('/p/Proj.Code-Workspace')
+    False
+    >>> is_workspace_target('/p/a.txt')
+    False
+    """
+
+    return path.endswith(WORKSPACE_SUFFIX)
+
+
+# 这几件事都以"目标是个文件编辑器"为前提，工作区 URI 一条都不成立：行号没地方跳、
+# --wait 的 marker 没人删（wait_marker 没有超时，会永久挂住）、diff/merge 少一个文件、
+# -a 加不进任何工作区。所以碰到"目标是 .code-workspace"就说明白，别静默做错事。
+WORKSPACE_USE = {
+    'diffMode': 'diff 的文件',
+    'mergeMode': 'merge 的文件',
+    'addMode': '加进工作区的目录',
+}
+
+
+def workspace_conflict(tokens):
+    """目标里有 .code-workspace，又踩了 --wait / 行号 / -d / -m / -a -> 返回要报的话
+
+    只拦"语义会消失"的组合。光 `edit x.code-workspace`（打开工作区本身）是对的，放行；
+    判据与上游一致，所以只有真会被改判的才进来。
+
+    >>> workspace_conflict(normalize(['/p/proj.code-workspace'])) is None
+    True
+    >>> workspace_conflict(normalize(['--wait', '/p/a.txt'])) is None
+    True
+    >>> workspace_conflict(normalize(['/p/proj.code-workspace:3'])).startswith(
+    ...     'edit: 工作区文件不支持 :行号')
+    True
+    >>> workspace_conflict(normalize(['-d', '/p/a.txt', '/p/b.txt', '/p/p.code-workspace']))
+    'edit -d: /p/p.code-workspace 是工作区文件，不能当 diff 的文件（要的是普通文件 / 目录）'
+    >>> workspace_conflict(normalize(['-m', 'a', 'b', '/p/base', '/p/p.code-workspace']))[:9]
+    'edit -m: '
+    >>> workspace_conflict(normalize(['--wait', '/p/p.code-workspace'])).startswith(
+    ...     'edit --wait: /p/p.code-workspace 是工作区文件')
+    True
+    """
+
+    used: list[tuple[str, str]] = []      # (选项名, 这选项要什么)，报错时逐个列出
+    wait = False
+    targets: list[tuple[str, str | None]] = []    # (路径, 行号)；行号 None = 不是跳转目标
+
+    for t in tokens:
+        match t:                          # 一趟收齐：目标从位置参数和 -m 那类取值两处来
+            case ('goto', file, line, _col):
+                targets.append((file, line))
+
+            case ('file', path):
+                targets.append((path, None))
+
+            case ('opt', flag, 'wait', _values):
+                wait = True
+
+            case ('opt', flag, field, values):
+                targets += [(v, None) for v in values]
+
+                if what := WORKSPACE_USE.get(field):
+                    used.append((flag, what))
+
+    for path, line in targets:
+        if not is_workspace_target(path):
+            continue
+
+        if line is not None:
+            return ('edit: 工作区文件不支持 :行号（%s:%s）—— 窗口是把它当**工作区**打开的，'
+                    '不是当文件跳行' % (path, line))
+
+        if used:
+            return ('edit %s: %s 是工作区文件，不能当 %s（要的是普通文件 / 目录）'
+                    % (' / '.join(flag for flag, _ in used), path,
+                       ' / '.join(what for _, what in used)))
+
+        if wait:
+            return ('edit --wait: %s 是工作区文件，等不到"被关掉"（--wait 等的是文件编辑器'
+                    '被关掉）；要等关掉请换成普通文件' % path)
+
+    return None
+
+
 # open 报文的形状（字段名是上游 CLI 的；报文示例见 NOTES 开头那段）。
 # waitMarkerFilePath 只在带 --wait 且造出 marker 时才出现 —— 用 total=False 继承表达
 # "选填"（typing.NotRequired 是 3.11+，不引 typing_extensions）
@@ -2424,6 +2528,15 @@ def main():
             t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
         sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
             t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
+
+    # .code-workspace 会被服务端改判成"打开工作区"（server-main.js 的 sU()）：能开，
+    # 但打开的不是文件编辑器，于是行号 / --wait / -d / -m / -a 的语义全不成立 ——
+    # 尤其 --wait 的 marker 没人删，wait_marker 又没有超时，会永久挂住。同一位置
+    # 报错（也在挑窗口之前），别让这些组合静默做错事
+    conflict = workspace_conflict(tokens)
+
+    if conflict:
+        sys.exit(conflict)
 
     # --interactive：先挑窗口。挑完把 socket 写回环境，后面所有 current_socket()
     # 就都指向它 —— 直连、--init 的默认值、以及回退时 CLI 继承的环境，全都跟着走，

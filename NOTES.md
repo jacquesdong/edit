@@ -41,6 +41,47 @@ Content-Length: 189
 `remote-cli` 的收包逻辑（抓自 `server-cli.js`）：读完整回复 → `JSON.parse` →
 **`statusCode === 200` 算成功**，否则失败；解析不出来也算失败。我们照抄这个判据。
 
+**两档失败，退出码不一样**（同一段代码里就看得出）：socket 层连不上 / 回包中断 →
+`Unable to connect to IDE server: …` + `process.exit(1)`；业务层是**回 HTTP 状态码** ——
+未知 `type` 给 **404**（`Unknown message type: …`）、handler 抛异常给 **500**、坏 JSON 也算
+失败，而 CLI 那边只是 `.catch` 里 `console.error("Error when invoking the open command: …")`，
+**退出码仍是 0**。我们把两档合成一个 `None`（`socket_request`），再由调用点退 CLI 兜底 ——
+判据一致，策略不同。
+
+**服务端会把 URI 重新分类**（`server-main.js` 的 `open()`）：`fileURIs` 逐个过
+`sU()` —— 判据就是**扩展名** `.code-workspace`（`b5 = ".code-workspace"`，纯路径判定不看
+内容）—— 命中就变成 `{workspaceUri}`，其余是 `{fileUri}`；`folderURIs` 一律 `{folderUri}`。
+所以 `.code-workspace` 无论我们放哪个字段，最终都按"打开工作区"走（`edit` 传达不了"我要把
+这个 workspace 当普通文件打开"这个意图）。顺带它还会推断
+`preferNewWindow: !reuse && !wait && !add && !remove`。
+
+### 工作区文件（`.code-workspace`）：协议能表达，四种语义不认
+
+判据抄上游：extname 严格等于小写 `.code-workspace`（所以 `X.Code-Workspace` 上游是当**普通
+文件**在文本编辑器里打开，我们也不拦，别分叉）。**继续放 `fileURIs`** —— 服务端只对
+`fileURIs` 做这个改判，那是唯一能表达"打开工作区"的入口。**别为了"语义正确"挪进
+`folderURIs`**：那边一律按文件夹处理、服务端不判，于是窗口打开一个叫 `x.code-workspace`
+的**空文件夹**，工作区里的 folders/settings 全丢（还不如当文件打开，至少能看见内容）。
+
+改判之后，以"目标是个文件编辑器"为前提的四件事**全部不成立**：
+
+| 命令行 | 服务端给窗口的 | 后果 |
+|---|---|---|
+| `edit x.code-workspace` | `{workspaceUri}` | 开工作区 —— **这是对的**，放行 |
+| `edit x.code-workspace:3` | `{workspaceUri: "…x.code-workspace:3"}` | 窗口去找名叫 `x.code-workspace:3` 的工作区文件 → 打不开（不是"行号被忽略"，是路径整个错了） |
+| `edit --wait x.code-workspace` | 同上 + `waitMarkerFileURI` | marker 只在**那个文件的编辑器**被关掉时删 → 没人删 → `wait_marker`（无超时）**永久挂住** |
+| `edit -d a.py x.code-workspace` | 两个 `fileUri` 里一个被改判 | `diffMode` 只剩一个文件 → 静默退化成"打开工作区" |
+
+所以 `workspace_conflict()` 在参数校验层（紧跟 `-a/-d/--wait` 空目标那条，同样在挑窗口之前）
+拦三种组合：**行号**、**`--wait`**、**`-d` / `-m` / `-a`**（`-a` 是"把目标加进工作区"，目标却是
+一个工作区文件，同样是静默做错事）。`--interactive` / fzf 列表里出现工作区文件**不拦** ——
+用户挑它就是要开工作区。
+
+上游自己**没有**这些护栏（`code x.code-workspace:3` 也是这么发出去的），我们比它多一道的理由
+是：`-d` / 行号那些只是"语义失效"，而 `--wait` 那条会把 `edit` **挂死**（`wait_marker` 只有
+Ctrl-C 能打断）。想"把工作区文件当文本打开"只能走别的编辑器（`$EDITOR x.code-workspace`）——
+协议里 `open` 只有 fileUri / folderUri / workspaceUri 三类，没有"指定用文本编辑器打开"。
+
 ### 各参数对应哪个字段
 
 | 命令行 | 报文 |
@@ -61,6 +102,9 @@ URI 编码与 `remote-cli` 逐字节一致：空格 `%20`、非 ASCII 按 UTF-8 
 
 `remoteAuthority` / `waitMarkerFilePath` 只有在对应场景才发，普通 open 没有。
 `--wait` 时多一个 `waitMarkerFilePath`（CLI 现造的临时文件，每次路径都不同）。
+
+`/dev/null` 被 CLI **特意算文件**（不进 `folderURIs`）—— 为的是 `code --diff a.py /dev/null`
+这种"跟空文件比"的用法。所以 `-d` 遇到 `/dev/null` 别当异常、也别把它转成绝对路径之外的东西。
 
 **唯一与 CLI 故意不同的字段**：`gotoLineMode`，两个方向各一格：
 
@@ -407,6 +451,11 @@ Error: no such file "https://example.com/"        # 退出 2
 实测走 `--dry-run`（不真开浏览器）：那一次打印的是 `/usr/bin/open https://example.com`，
 不是 `edit --open …`。
 
+**内置浏览器不在这个协议里**：那四种 `type` 之外，IDE 内嵌预览只有窗口内的
+`simpleBrowser.api.open`（扩展 API / agent 工具能触发），**命令行没有对应报文**。所以
+`--open` 只能到**系统浏览器**，上面那三级兜底（CLI → `$BROWSER` → `xdg-open`）全在系统侧 ——
+"在 IDE 窗口里预览"这条路命令行走不通，别再找第四级。
+
 ### 认不出产品名时怎么定 kind（`cli_kind` 的两条判据）
 
 1. 先比 basename 查 `CLI_KIND`（`code` / `vim` / `nano` / `emacs`）；
@@ -475,6 +524,10 @@ Error: no "edit" rule for type "text/plain" passed its test case      # 退出�
 `~/.local/bin` 稳稳压在 `/usr/bin` 前面，并接受"换台机器 `edit` 可能不是它"。
 
 ## 窗口发现与 workspace
+
+**上游 CLI 没有这一层**：窗口 socket 的路径只从 `VSCODE_IPC_HOOK_CLI` 读（`server-cli.js`
+里就一句 `Le = process.env.VSCODE_IPC_HOOK_CLI`），**它自己不扫目录** —— 一个 shell 只有一个
+目标窗口。下面这些（多窗口发现、排序、挑窗口）全是 edit 自己加的。
 
 - `find_sockets()`：扫 `/proc/net/unix`（只列已 bind 的，天然过滤残留 socket 文件）+
   `/proc/*/fd` 的 `socket:[inode]` 反查 pid → `/proc/<pid>/exe` 推安装目录；
