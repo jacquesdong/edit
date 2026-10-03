@@ -2019,15 +2019,16 @@ def use_fzf():
     """挑窗口时该不该用 fzf：没被关掉、有 fzf、且 stdin 是 tty
 
     stdin 不是 tty 就不用（printf '3\\n' | edit --interactive 是脚本用法，
-    而且 fzf 要独占终端）。EDIT_FZF 设成 ENV_OFF 那套（'' / 0 / false / f / off /
-    no / n / never，大小写不敏感）就显式关掉 —— 和 EDIT_DEBUG 同一个判据（env_flag），
-    所以 `EDIT_FZF=OFF` 这种大写也认（以前只认小写的 'off'）。
-    注意 '' 也算关：和 EDIT_DEBUG 保持一致（要"用 fzf"就别设它）。
+    而且 fzf 要独占终端）。EDIT_FZF 设成 ENV_OFF 那套（'' / 0 / false / off / no /
+    n / never，大小写不敏感）就显式关掉 —— 和 EDIT_DEBUG 同一个判据（env_flag），
+    所以 `EDIT_FZF=OFF` 这种大写也认（以前只认小写的 'off'），`EDIT_FZF=` 空串也算关。
+    这个开关默认**开**（没设 = 用），所以 env_flag 传 default=True —— 和 EDIT_DEBUG
+    （没设 = 关）相反，别把两个默认值写反。
     不写 doctest：它看的是当前终端和 PATH。
     """
 
-    if EDIT_FZF in os.environ and not env_flag(EDIT_FZF):
-        return False                    # 显式关；env_flag 对"没设"也返回 False，所以先判有没设
+    if not env_flag(EDIT_FZF, True):
+        return False
 
     return sys.stdin.isatty() and bool(shutil.which('fzf'))
 
@@ -2285,18 +2286,37 @@ def print_usage():
     print(__doc__)
 
 
-# env_flag() 认的"关"：置空、假、关闭、否、never（大小写由 env_flag 统一折成小写）。
-# EDIT_DEBUG / EDIT_FZF 共用这一套；'never' 是 EDIT_FZF 那边的老写法（--color=never 那种），
-# 顺手让 EDIT_DEBUG=never 也成立 —— 没人这么写，只是同一套判据里多一个词
-ENV_OFF = ('', '0', 'false', 'f', 'off', 'no', 'n', 'never')
+# env_flag() 认的"关"：置空、假（false）、关闭（off）、否（no / n）、never（大小写由
+# env_flag 统一折成小写）。取值集合 ≈ CMake `if()` 的 false 常量（0 / OFF / NO / FALSE /
+# N / IGNORE / NOTFOUND / 空），少了 CMake 特有的 IGNORE / NOTFOUND，多了 'never'
+# （--color=never 那派的三态用词，顺手让 EDIT_DEBUG=never 也成立）。
+#
+# 是**黑名单**不是白名单：不在表里的非空值都算开（EDIT_DEBUG=maybe 也开）。拼错因此
+# 落到"开"（看得见）而不是"关"（静默失效）—— 调试类开关宁可误开。真需要白名单的是三态
+# 那边（COLOR_CHOICES），所以下面这行留着当备忘，暂时不启用：
+#   ENV_ON = ('1', 'true', 'on', 'yes', 'y', 'always')
+ENV_OFF = ('', '0', 'false', 'off', 'no', 'n', 'never')
 
-def env_flag(name):
-    """环境变量开关：ENV_OFF 里那几个都算关（大小写不敏感），其余非空算开
+def env_flag(name, default):
+    """环境变量开关：没设返回 default，设了就看在不在 ENV_OFF 里（大小写不敏感）
 
     argparse 的 default 只做真值判断，所以得在这儿先把 '0' / 'FALSE' 这种字符串
     折成 False，否则 EDIT_DEBUG=0 反而会打开调试。
+
+    default 是**必填**的：两个开关的默认值相反（EDIT_DEBUG 没设=关、EDIT_FZF 没设=
+    用），写在这儿比留在调用点清楚 —— 老实现对"没设"也返回 False，于是 EDIT_FZF 只能
+    在调用点先判 `EDIT_FZF in os.environ` 绕一下，现在不用了。
+
+    >>> env_flag('EDIT_NO_SUCH_VAR', False)     # 没设 = default
+    False
+    >>> env_flag('EDIT_NO_SUCH_VAR', True)
+    True
     """
-    return os.environ.get(name, '').lower() not in ENV_OFF
+
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.lower() not in ENV_OFF
 
 
 def env_color():
@@ -2325,7 +2345,8 @@ def build_args():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
-    parser.add_argument('--debug', action='store_true', default=env_flag(EDIT_DEBUG))
+    parser.add_argument('--debug', action='store_true',
+        default=env_flag(EDIT_DEBUG, False))
     parser.add_argument('--color', nargs='?', const=COLOR_ALWAYS, default=env_color(),
                         choices=COLOR_CHOICES,
                         help='给窗口表和 --debug 的日志上色：不传=auto（仅终端），'

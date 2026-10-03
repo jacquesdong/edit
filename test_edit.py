@@ -1788,6 +1788,53 @@ class UseFzfTest(unittest.TestCase):
         self.check(self.env(), True, True, True)
 
 
+class EnvFlagTest(unittest.TestCase):
+    """env_flag：ENV_OFF 黑名单 + 必填的 default（两个开关默认值相反，写在调用点才清楚）"""
+
+    def flag(self, value, default):
+        """在"EDIT_DEBUG = value"（None = 没设）的环境下取 env_flag"""
+
+        env = {} if value is None else {edit.EDIT_DEBUG: value}
+
+        with patch.dict(os.environ, env, clear=True):
+            return edit.env_flag(edit.EDIT_DEBUG, default)
+
+    def test_unset_is_the_default(self):
+        """没设 = default：靠它区分"默认关"（EDIT_DEBUG）与"默认开"（EDIT_FZF）
+
+        老实现对"没设"也返回 False，于是 EDIT_FZF 只能在 use_fzf 里先判
+        `EDIT_FZF in os.environ` 绕一下 —— 现在不用了。
+        """
+
+        self.assertFalse(self.flag(None, False))
+        self.assertTrue(self.flag(None, True))
+
+    def test_off_values(self):
+        """ENV_OFF 那套都算关，哪怕 default 是"开" """
+
+        for off in edit.ENV_OFF + ('OFF', 'Never', 'FALSE', 'No'):
+            with self.subTest(off):
+                self.assertFalse(self.flag(off, True))
+
+    def test_anything_else_is_on(self):
+        """黑名单：不在表里的非空值都算开 —— 拼错落在"开"（看得见）而不是"关"
+
+        'f' 也在里面：ENV_OFF 已按 CMake 的 false 常量收窄（那边只有 FALSE，没有 F），
+        所以 `EDIT_FZZ=f` 现在是开。
+        """
+
+        for on in ('1', 'yes', 'on', 'maybe', 'f'):
+            with self.subTest(on):
+                self.assertTrue(self.flag(on, False))
+
+    def test_debug_defaults_to_off(self):
+        """EDIT_DEBUG 没设 = 关：--debug 的默认值就是它（和 EDIT_FZF 相反）"""
+
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(sys, 'argv', ['edit.py']):
+            self.assertFalse(edit.build_args()[0].debug)
+
+
 class InitTest(ProcCase):
     """--init：挑窗口 -> 只把该窗口的 hook 与 remote-cli 目录写进片段"""
 

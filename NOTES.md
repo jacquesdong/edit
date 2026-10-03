@@ -591,6 +591,32 @@ IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，�
   不上色时也挂这个 filter（`color=False`），于是两个格式串都用 `%(levelmark)s`，
   不必再分"有没有装 filter" —— 少一处能漏的分支。
 
+## 开关取值：三层约定，别互相污染
+
+| 层 | 谁在用 | 判据 | 认不出的值 |
+| --- | --- | --- | --- |
+| 自定义开关（edit 私有） | `EDIT_DEBUG` / `EDIT_FZF` | `env_flag(name, default)`：`ENV_OFF` **黑名单** | 算**开** |
+| 三态（edit 私有） | `--color` / `EDIT_COLOR` | `COLOR_CHOICES` **白名单** + 回落 `auto` | 回落 `auto` |
+| 跨工具约定 | `should_color` 一处 | `NO_COLOR` / `FORCE_COLOR` / `TERM` | —— |
+
+- **`NO_COLOR` / `FORCE_COLOR` / `TERM` 只归 `should_color` 读，不要加进 `ENV_OFF`**：
+  它们是"输出能不能上色"的跨工具约定，进了黑名单会让 `EDIT_DEBUG` 被环境莫名关掉。
+  反过来 `--color` 也不认 `ENV_OFF` —— 三态要能区分 `never` 与 `always`，压成布尔就把
+  "强制"那档丢了。
+- **黑名单而不是白名单**：拼错落在"开"（看得见），白名单会落在"关"（静默失效）。调试类
+  开关宁可误开。真需要白名单的是三态那边，所以 `ENV_ON = ('1','true','on','yes','y',
+  'always')` 那行只当备忘留在 `ENV_OFF` 上方，暂不启用。
+- **`ENV_OFF` ≈ CMake `if()` 的 false 常量**（`0` / `OFF` / `NO` / `FALSE` / `N` /
+  `IGNORE` / `NOTFOUND` / 空），少了 CMake 特有的 `IGNORE` / `NOTFOUND`，多了 `never`
+  （`--color=never` 那派的词）。`f` 已去掉 —— CMake 也没有 `F`，收窄得更自洽。
+- **`default` 必填**：两个开关方向相反（`EDIT_DEBUG` 没设=关、`EDIT_FZF` 没设=用），
+  写在调用点比留在函数里靠记清楚。历史：老实现对"没设"也返回 `False`，于是 `use_fzf`
+  里得先判 `EDIT_FZF in os.environ` 绕一下，现在那句删了。
+- **neutral 那一档各家叫法不同**：git / ls / grep 叫 `auto`，Spring（logback）叫
+  `detect`（`spring.output.ansi.enabled` 默认就是它），CMake **没有**这一档，只有 ON/OFF
+  —— 二值约定碰上"要不要上色"本来就不够用，这正是 `--color` 必须做三态的原因。我们取
+  `auto`（命令行惯例），语义等价于服务端的 `detect`。
+
 ## 还没做 / 待办
 
 1. ~~`--wait`~~ 已直连（见上：mkstemp marker + 等窗口删它，与 CLI 同机制）。
