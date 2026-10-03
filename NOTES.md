@@ -129,9 +129,10 @@ socket 本来就进不了候选（`load_sockets()` 只认 `/proc/net/unix` 里�
 `BROWSER=/…/codebuddy-server-cn/bin/stable-…/bin/helpers/browser.sh` —— IDE 自己装的那份
 `browser.sh`，内部还是 `server-cli.js` → **同一个 socket**。所以"窗口失败就退 `$BROWSER`"
 在装了 VS Code / CodeBuddy 的机器上可能只是把同一个失败换个进程再犯一遍（本机实测：退过去
-之后 node 报 `Unable to connect to IDE server: … ENOENT`，退出 1）。跟 `SELF_NAMES` 同一类
-问题：**认出是自己人就别回退给自己**。`find_browser()` 现在还没滤这一条（`OPENERS` 里只有
-`xdg-open`，本机没装），待办见下面"还没做"。
+之后 node 报 `Unable to connect to IDE server: … ENOENT`，退出 1）。跟 `EDIT_NAMES` 同一类
+问题：**认出是自己人就别回退给自己**。`find_browser()` 现已在 `BROWSER_NAMES`
+（`browser.sh`）里把这条滤掉——`EDIT_NAMES` 之外并列的一份（`OPENERS` 里只有 `xdg-open`，
+本机没装时，没窗口就会干净地报"没有能打开链接的程序"，而不是一圈 node `ENOENT`）。
 
 ### 工作区文件（`.code-workspace`）：协议能表达，四种语义不认
 
@@ -524,7 +525,7 @@ Error: no such file "https://example.com/"        # 退出 2
 所以 Linux 的兜底只留 xdg-open（本机恰好没装，于是 `--open` 在这台机器上没有
 系统浏览器可退：没有窗口时会直接报错退出，而不是去 exec 一个必错的 run-mailcap）。
 
-**BROWSER 写的是自己时跳过**（`SELF_NAMES`）：`BROWSER='edit --open'` 又正好没有窗口
+**BROWSER 写的是自己时跳过**（`EDIT_NAMES`）：`BROWSER='edit --open'` 又正好没有窗口
 可直连时，会一路 exec 回自己 —— exec 是换进程、不是 fork 炸弹，但同样一圈接一圈停不下来。
 实测走 `--dry-run`（不真开浏览器）：那一次打印的是 `/usr/bin/open https://example.com`，
 不是 `edit --open …`。

@@ -2385,7 +2385,11 @@ def open_external_msg(uris: list[str]) -> OpenExternalMsg:
 
 # BROWSER 写的是自己时就跳过：BROWSER='edit --open' 又正好没有窗口可直连时，
 # 一路 exec 回自己会一圈接一圈停不下来
-SELF_NAMES = ('edit', 'edit.py')
+EDIT_NAMES = ('edit', 'edit.py')
+# IDE 自家的 browser.sh（macOS / Linux remote 的 helper 都叫这个）内部还是调
+# server-cli.js -> 同一个 socket，等于把直连失败换个进程再犯一遍，没有任何收益；
+# 认出就跳过，和 EDIT_NAMES 同一类问题（"别回退给自己人"）
+BROWSER_NAMES = ('browser.sh',)
 
 
 def find_browser() -> list[str] | None:
@@ -2400,6 +2404,9 @@ def find_browser() -> list[str] | None:
     >>> os.environ['BROWSER'] = 'edit --open'       # 是自己：跳过，别自己调自己
     >>> find_browser() is None or os.path.basename(find_browser()[0]) != 'edit'
     True
+    >>> os.environ['BROWSER'] = '/opt/codebuddy/bin/helpers/browser.sh'  # IDE 自家的
+    >>> find_browser() is None or os.path.basename(find_browser()[0]) != 'browser.sh'
+    True
     >>> _ = os.environ.pop('BROWSER')
     """
 
@@ -2407,7 +2414,8 @@ def find_browser() -> list[str] | None:
     if v:
         cmd = split_cmd(v)
 
-        if cmd and os.path.basename(cmd[0]) not in SELF_NAMES:
+        base = os.path.basename(cmd[0]) if cmd else ''
+        if cmd and base not in EDIT_NAMES and base not in BROWSER_NAMES:
             return cmd
 
     for name in OPENERS:
