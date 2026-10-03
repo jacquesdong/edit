@@ -55,6 +55,25 @@ stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解�
 然后 **exit 0** —— 而 `edit -a`（空目标）是 edit 自己 `sys.exit` → 1。同类错误两种退出码。
 **edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）。
 
+### 收发分三层：底层只交付字节，解读留给调用方
+
+`edit` 跟 socket 的收发按"信息量从少到多"分了三层，每一层刚好只多挤出它的调用方
+真正要的那点信息：
+
+| 层 | 函数 | 返回 | 谁用 | 回答的问题 |
+| --- | --- | --- | --- | --- |
+| 最底 | `raw_request` | 原始字节 / 失败就返回那个 `OSError` | 被上两层调 | "字节收发成没成" |
+| 中间 | `socket_request` | 原始字节 / 失败返回 `None` | `socket_status`（并发探活） | "连上没连上" |
+| 上层 | `socket_reply` | `Reply(ok, reason, detail)` 三态 | `main`（发 `open` / `openExternal`） | "连不上"还是"连上了但被拒" |
+
+关键取舍：最底那层**不当裁判**——连不上 / 超时都原样返回 `OSError`，不猜业务含义，
+让两层语义（探活 / 发 `open`）各取所需。名字刻意统一用 `raw`（跟 `http_code(raw)` /
+`http_body(raw)` 里同一个词）：从底层返回的字节，到 `socket_reply` 里 `raw = raw_request(...)`
+都是"未解析字节"这同一对象，读代码不用做类型转换。
+
+探活（`socket_status` 在 `--list` 的线程里跑）只要"成没成"，失败原因只在 `--debug`
+里留；发 `open` 必须把"连不上"与"连上了但被拒"分开，因为两者下一步动作不同（见上表）。
+
 **服务端会把 URI 重新分类**（`server-main.js` 的 `open()`）：`fileURIs` 逐个过
 `sU()` —— 判据就是**扩展名** `.code-workspace`（`b5 = ".code-workspace"`，纯路径判定不看
 内容）—— 命中就变成 `{workspaceUri}`，其余是 `{fileUri}`；`folderURIs` 一律 `{folderUri}`。
@@ -77,7 +96,7 @@ stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解�
 node），直落 `$BROWSER` / `xdg-open` —— 系统浏览器是另一个通道、不依赖窗口，而 `--open`
 本来就是"把链接交给系统浏览器"的意思。两者都没有才退出。
 
-**为什么不换窗口重试**（试过，结论是不做）：`_request` 失败可能是"根本没发出去"（connect
+**为什么不换窗口重试**（试过，结论是不做）：`raw_request` 失败可能是"根本没发出去"（connect
 阶段 ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）—— 后者重发
 会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页）。那不是浪费，是**有副作用
 的重试**。要安全重试得先能区分这两段（connect 与 send/recv 分开报），而窄收益不值：残留

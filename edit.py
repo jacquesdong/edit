@@ -946,13 +946,14 @@ def parse_status(text):
 
     return m.group(1), m.group(2).strip() or None
 
-def _request(sock, msg, timeout):
-    """发一次请求，返回回复字节；失败**返回那个 OSError**（不当场处理）
+def raw_request(sock, msg, timeout):
+    """发一次请求，返回回复的原始字节；失败**返回那个 OSError**（不当场处理）
 
-    分层是为了让调用方选精度：探活只要"成没成"（`socket_status`），发 open 的还要分
-    "连不上"和"连上了但被拒"（`socket_reply`）。
+    三层里最底的一层，名字说的是"未解析的字节"（和 http_code / http_body 里的 raw
+    同一个词）：探活只要"成没成"（socket_request），发 open 的还要分"连不上"和
+    "连上了但被拒"（socket_reply）。
 
-    >>> isinstance(_request('/no-such.sock', {'type': 'status'}, timeout=0.1), OSError)
+    >>> isinstance(raw_request('/no-such.sock', {'type': 'status'}, timeout=0.1), OSError)
     True
     """
 
@@ -996,7 +997,7 @@ def socket_request(sock, msg, timeout=1.5):
     True
     """
 
-    reply = _request(sock, msg, timeout)
+    reply = raw_request(sock, msg, timeout)
 
     return None if isinstance(reply, OSError) else reply
 
@@ -1808,7 +1809,7 @@ class Reply(NamedTuple):
     "改用 CLI"—— 而 CLI 走的是同一个 socket、同一份报文，注定再失败一次（`--wait`
     还白搭一次进程、把 marker 收回来重造）。所以两态都直接退出，把原因说清楚。
 
-    **为什么不重试另一个窗口**：`_request` 失败可能是"根本没发出去"（connect 阶段
+    **为什么不重试另一个窗口**：`raw_request` 失败可能是"根本没发出去"（connect 阶段
     ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）——
     后者重发会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页），
     那不是浪费，是有副作用的重试。要安全重试，得先能区分这两段（把 connect 与
@@ -1830,7 +1831,7 @@ def socket_reply(sock, msg, timeout=3.0):
     'unreachable'
     """
 
-    raw = _request(sock, msg, timeout)
+    raw = raw_request(sock, msg, timeout)
 
     if isinstance(raw, OSError):
         # 键是 ('errno', 数字)：平台没有的 errno 查不到就落回 strerror ——
