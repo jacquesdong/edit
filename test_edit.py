@@ -239,15 +239,19 @@ class SocketOpenTest(EditCase):
         self.assertEqual(msg['fileURIs'], ['file://' + self.a + ':3:5'])
 
     def test_flags(self):
-        for flag, field in (('-r', 'forceReuseWindow'),
-                            ('--reuse-window', 'forceReuseWindow'),
-                            ('-n', 'forceNewWindow'),
-                            ('-a', 'addMode')):
+        # -a 把目录加进工作区，所以那个用例走目录（self.dir）、落到 folderURIs；
+        # 其余开关吃文件（self.a），落到 fileURIs
+        for flag, field, target, key in (
+                ('-r', 'forceReuseWindow', self.a, 'fileURIs'),
+                ('--reuse-window', 'forceReuseWindow', self.a, 'fileURIs'),
+                ('-n', 'forceNewWindow', self.a, 'fileURIs'),
+                ('-a', 'addMode', self.dir, 'folderURIs')):
             with self.subTest(flag):
-                msg = self.open_msg(flag, self.a)
+                msg = self.open_msg(flag, target)
 
                 self.assertEqual(msg[field], True)
-                self.assertEqual(msg['fileURIs'], ['file://' + self.a])
+                self.assertEqual(msg[key], ['file://' + target])
+                self.assertEqual(msg['fileURIs' if key == 'folderURIs' else 'folderURIs'], [])
 
     def test_diff(self):
         msg = self.open_msg('-d', self.a, self.b)
@@ -950,6 +954,29 @@ class NoTargetTest(EditCase):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn('-d 后面没有文件或目录', proc.stderr)
         self.assertNotIn('Traceback', proc.stderr)
+
+    def test_target_type_guards(self):
+        """给了错类型目标也自己报错（不交给 CLI）：--wait 要文件、-a 要目录"""
+
+        # 误用：--wait 没有文件（只有目录）、-a 给了文件（混了文件也算）
+        for args, needle in ((['--wait', self.dir], '后面得是文件'),
+                              (['-a', self.a], '后面得是目录'),
+                              (['-a', self.dir, self.a], '后面得是目录')):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn(needle, proc.stderr)
+                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+        # 有正确类型就放行：--wait 有文件、-a 有目录（混了别的也放行）
+        for args in (['--wait', self.a], ['-a', self.dir], ['--wait', self.a, self.dir]):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 7, proc.stderr)   # 交给假 CLI
+                self.assertNotIn('后面得是文件', proc.stderr)
+                self.assertNotIn('后面得是目录', proc.stderr)
 
 
 class WorkspaceTargetTest(EditCase):

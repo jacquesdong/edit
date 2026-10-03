@@ -53,7 +53,12 @@ stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解�
 **这条会传染给 edit**：`os.execv` 是整个替换进程，CLI 的退出码就是 edit 的。已出现的例子：
 `edit --wait somedir/` 曾经落进 CLI、由它打印 `At least one file must be provided to wait for.`
 然后 **exit 0** —— 而 `edit -a`（空目标）是 edit 自己 `sys.exit` → 1。同类错误两种退出码。
-**edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）。
+**edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）：`-a` / `-d` / `--wait`
+空着就报"没有文件或目录"。进一步，`--wait` 给的不是文件（只有目录、或认不出的字面量）、`-a` 只给了文件
+（不是目录）也拦 —— 前者 `--wait` 的 marker 没人删会永久挂住，后者文件加不进工作区。
+只在"能确定是误用"时拦：`folder` / `file` / `goto` 类型清楚，照此判；纯 `other`（认不出的
+字面量）交给 CLI 自己判，不预裁决（`--wait` 除外：它必须绑定一个文件，other 也不是文件，
+所以同样拦，见上；`-a` / `-d` 的 other 仍交 CLI，和 `nothing_to_open` 把 `other` 当"有目标"同一理由）。
 
 ### 收发分三层：底层只交付字节，解读留给调用方
 
@@ -344,7 +349,9 @@ async function Co(e){ for(; existsSync(e);) await sleep(1s) } // 1 秒轮询
   带 `waitMarkerFilePath` 的报文、关文件时删掉 marker、我们退出 0 —— 不起 node。
 
 `-w` 是 `--wait` 的别名（同上源码里 `wait:{type:"boolean",alias:"w"}`）。
-`--wait` 只给目录不认（CLI 要求至少一个文件），这种就交回 CLI 让它报错。
+`--wait` 给的不是文件（只有目录、或认不出的字面量）被我们直接拦下报"得是文件"，
+不再交回 CLI —— 否则 CLI 只会回一个 exit 0 的 `At least one file must be provided`（见上误用
+一节），把失败伪装成成功。
 
 ### 交回别的 CLI 时摘掉 VS Code 系的开关
 

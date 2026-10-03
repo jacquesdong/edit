@@ -1369,6 +1369,62 @@ def nothing_to_open(tokens):
     return True
 
 
+def wait_but_no_file(tokens):
+    """--wait 后面得是文件：--wait 等的是"文件编辑器关掉"那一刻删 marker，目录没有
+    "编辑器"这一说、marker 没人删 wait_marker 会永久挂住；非文件目标（目录、认不出的
+    参数）也一样不算"可等的文件"。所以只要 wait 在、又没有 file / goto，就算误用；
+    空着（连 other 都没有）交给上面 nothing_to_open 报"没有文件或目录"，不在这重复。
+    返回 (是否误用, 命中的 flag)：误用为 (True, flag)，没误用为 (False, None)。
+
+    >>> wait_but_no_file(normalize(['--wait', '/tmp']))          # 只有目录 -> flag
+    (True, '--wait')
+    >>> wait_but_no_file(normalize(['--wait', 'a.txt']))         # 有文件：OK
+    (False, None)
+    >>> wait_but_no_file(normalize(['--wait', 'a.txt', '/tmp'])) # 有文件：OK
+    (False, None)
+    >>> wait_but_no_file(normalize(['-a', '/tmp']))               # 不是 --wait
+    (False, None)
+    """
+
+    wait_flag = has_file = False
+    for t in tokens:
+        match t:
+            case ('opt', flag, 'wait', _):
+                wait_flag = flag
+            case ('file' | 'goto', _):
+                has_file = True
+
+    return (True, wait_flag) if (wait_flag and not has_file) else (False, None)
+
+
+def add_but_no_dir(tokens):
+    """-a 给的却是文件：-a 把目录加进工作区，文件加不进去。目标里出现 file / goto
+    （且不是 .code-workspace，那种交给 workspace_conflict 报）就算误用；纯 other 交给
+    CLI 自己判，不预裁决。返回 (是否误用, 命中的 flag)：误用为 (True, flag)，没误用为 (False, None)。
+
+    >>> add_but_no_dir(normalize(['-a', 'a.txt']))                 # 文件 -> flag
+    (True, '-a')
+    >>> add_but_no_dir(normalize(['-a', '/tmp']))                  # 目录：OK
+    (False, None)
+    >>> add_but_no_dir(normalize(['-a', 'a.txt', '/tmp']))         # 混了文件
+    (True, '-a')
+    >>> add_but_no_dir(normalize(['-a', 'proj.code-workspace']))   # 工作区交给另一条
+    (False, None)
+    >>> add_but_no_dir(normalize(['--wait', '/tmp']))              # 不是 -a
+    (False, None)
+    """
+
+    add_flag = has_file = False
+    for t in tokens:
+        match t:
+            case ('opt', flag, 'addMode', _):
+                add_flag = flag
+            case ('file' | 'goto', path) if not is_workspace_target(path):
+                has_file = True
+
+    return (True, add_flag) if (add_flag and has_file) else (False, None)
+
+
 # 服务端会把 fileURIs 里"扩展名是 .code-workspace"的那些**改判**成工作区
 # （server-main.js 的 open()：sU() 判据就是 extname 严格等于 b5 = ".code-workspace"，
 # 纯路径判定不看内容）。所以这类目标照样"能打开"，但打开的是工作区、不是文件编辑器。
@@ -2638,6 +2694,18 @@ def main():
             t[0] == 'opt' and t[2] in NEEDS_TARGET for t in tokens):
         sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(
             t[1] for t in tokens if t[0] == 'opt' and t[2] in NEEDS_TARGET))
+
+    # --wait 等的是"文件编辑器关掉"删 marker：目录没有这一说，marker 没人删
+    # wait_marker 会永久挂住；-a 是把目录加进工作区，文件加不进去。给了错类型目标
+    # 就自己报错（和 NEEDS_TARGET 那套同一个位置、同一个理由：误用一律自己报，
+    # 别交给 CLI 白跑或静默做错）
+    misuse, flag = wait_but_no_file(tokens)
+    if misuse:
+        sys.exit('edit %s: 后面得是文件（--wait 等的是文件编辑器关掉，目录没有这一说）' % flag)
+
+    misuse, flag = add_but_no_dir(tokens)
+    if misuse:
+        sys.exit('edit %s: 后面得是目录（add 把目录加进工作区，文件加不进去）' % flag)
 
     # .code-workspace 会被服务端改判成"打开工作区"（server-main.js 的 sU()）：能开，
     # 但打开的不是文件编辑器，于是行号 / --wait / -d / -m / -a 的语义全不成立 ——
