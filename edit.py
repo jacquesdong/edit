@@ -1010,12 +1010,8 @@ def http_code(raw):
     0
     """
 
-    parts = raw.split(b'\r\n', 1)[0].split()
-
-    if len(parts) > 1 and parts[1].isdigit():
-        return int(parts[1])
-
-    return 0
+    m = re.match(rb'HTTP/\d\.\d (\d{3})', raw)
+    return int(m.group(1)) if m else 0
 
 def socket_status(sock, timeout=1.5):
     """直连窗口 socket 问一次只读 status，返回 (authority, workspace)
