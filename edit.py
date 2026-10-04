@@ -7,9 +7,9 @@
   edit <文件...>               在当前 IDE 窗口打开文件
   edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
   edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
-  edit --open <链接...>        把链接交给系统浏览器打开（不走编辑器：直连窗口的
-                               openExternal，本地浏览器就会打开它；shell 里记得
-                               给带 & 的链接加引号）
+  edit <链接...>               参数像链接（带 :// 或 mailto: / tel:）就交给浏览器打开，
+                               不走编辑器；file:// 除外，当本地文件路径处理（vim 同款）
+                               —— shell 里记得给带 & 的链接加引号
   edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
   eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -95,14 +95,15 @@ waitMarkerFilePath 里，窗口在文件被关掉时删掉它，我们等它消�
 remote-cli 一模一样（它也是 createWaitMarkerFile + 每秒 existsSync 轮询），
 所以 git commit 之类的场景同样等得住，而且不起 node。
 
---open 走的是另一种报文：{"type":"openExternal","uris":[…]}（remote-cli 的
+链接走的是另一种报文：{"type":"openExternal","uris":[…]}（remote-cli 的
 --openExternal 就是它，IDE 的 browser.sh 也是这么开网页的）。链接不是文件 ——
 塞进 fileURIs 会变成 file:///当前目录/https:/… 这种东西，所以它自带一条路：
-取值不认行号、不转绝对路径、也不按 CLI 种类翻译，原样当 uris 发出去；不像链接
-（没有 ://）直接报错，不悄悄拿去当文件打开。直连不上时退回两级：code 系 CLI 加
---openExternal（和直连是同一件事，只是要起一次 node），别的 CLI 就退 $BROWSER
-（fish 的 help 认的那个变量，可带参数）或 xdg-open —— BROWSER 写的是自己时跳过，
-免得没有窗口可直连时一圈圈 exec 回来。
+参数里像链接的（normalize 认 is_uri）原样当 uris 发出去，不认行号、不转绝对路径、
+也不按 CLI 种类翻译；file:// 除外，decode 成路径后照常当本地文件（所以
+`edit file://$PWD/README.md` 开的就是那个文件，:行号也照旧认）。直连不上时退回
+两级：code 系 CLI 加 --openExternal（和直连是同一件事，只是要起一次 node），别的
+CLI 就退 $BROWSER（fish 的 help 认的那个变量，可带参数）或 xdg-open —— BROWSER
+写的是自己时跳过，免得没有窗口可直连时一圈圈 exec 回来。
 """
 
 from __future__ import annotations       # 注解不求值：别名放哪都行，运行期也不构造它们
@@ -321,7 +322,7 @@ COLOR_CHOICES = (COLOR_AUTO, COLOR_ALWAYS, COLOR_NEVER)
 # 所以也认 EDIT_COLOR —— 和 EDIT_DEBUG / EDIT_FZF 同一个理由
 EDIT_COLOR = 'EDIT_COLOR'
 
-# 没有 IDE 可托付时，--open 拿它打开链接（fish 的 help 就是认这个变量的）
+# 没有 IDE 可托付时，链接由它自己的浏览器那一级打开（fish 的 help 就是认这个变量的）
 BROWSER = 'BROWSER'
 
 IPC_HOOK = 'VSCODE_IPC_HOOK_CLI'
@@ -362,12 +363,12 @@ for i in ('emacs', 'emacsclient'):       # 当 $EDITOR 用的是后者
     CLI_KIND[i] = CLI_KIND_EMACS
 
 
-# --open：把链接交给系统（本地）浏览器 —— 用的是协议里第四种 type 的那条路
-# （NOTES 那张表的 openExternal），之前没接线。链接不是文件：塞进 open 的
-# fileURIs 会变成 file:///home/…/https:/… 这种东西，所以它自带一条路 ——
-# --open 的取值不进 token 流水线（不认行号、不转绝对、不按 kind 翻译），
-# 原样当 uris 发出去；CLI 那侧只有 code 系认 --openExternal，其余的退回
-# $BROWSER（fish 的约定）或 xdg-open。
+# 链接（https://… / mailto: …）：交给系统（本地）浏览器 —— 用的是协议里第四种 type
+# 的那条路（NOTES 那张表的 openExternal）。链接不是文件：塞进 open 的 fileURIs 会变成
+# file:///home/…/https:/… 这种东西，所以它自带一条路 ——
+# normalize 把这类参数摘成 ('external', 链接)（不认行号、不转绝对、不按 kind 翻译），
+# 原样当 uris 发出去；file:// 除外，decode 成路径后照常当本地文件。
+# CLI 那侧只有 code 系认 --openExternal，其余的退回 $BROWSER（fish 的约定）或 xdg-open。
 #
 # 报文之外的两种走法：
 #   code 系 CLI: cli --openExternal <链接…>   —— IDE 自己的 browser.sh 就是这么调的
@@ -1109,9 +1110,11 @@ GotoTarget: TypeAlias = tuple[str, str, str | None]     # 跳转目标本身（�
                                                        # goto_target / emit['goto'] 吃这个
 FileToken: TypeAlias = tuple[Literal['file'], str]
 FolderToken: TypeAlias = tuple[Literal['folder'], str]
+ExternalToken: TypeAlias = tuple[Literal['external'], str]   # 交给浏览器的链接（不是文件）
 OtherToken: TypeAlias = tuple[Literal['other'], str]
 
-Token: TypeAlias = OptToken | GotoToken | FileToken | FolderToken | OtherToken
+Token: TypeAlias = (OptToken | GotoToken | FileToken | FolderToken
+                    | ExternalToken | OtherToken)
 ArgToken: TypeAlias = GotoToken | FileToken | FolderToken    # arg_token 只产这三种
 
 
@@ -1246,6 +1249,18 @@ def normalize(args: list[str]) -> list[Token]:
     [('opt', '-a', 'addMode', []), ('folder', '/tmp'), ('file', 'a.txt')]
     >>> normalize(['-a'])               # 空着不算 normalize 的错：main 里 NEEDS_TARGET 报
     [('opt', '-a', 'addMode', [])]
+    >>> normalize(['https://example.com'])       # 链接：交给浏览器，不当文件
+    [('external', 'https://example.com')]
+    >>> normalize(['mailto:a@b.com', 'tel:+123'])  # 不带 // 的两种链接也认
+    [('external', 'mailto:a@b.com'), ('external', 'tel:+123')]
+    >>> normalize(['file:///a/b.txt'])           # file:// 当本地文件（同 vim 的 file://）
+    [('file', '/a/b.txt')]
+    >>> normalize(['file:///a/b.txt:12'])         # :行号照旧认（路径先解出来再交给 parse_goto）
+    [('goto', '/a/b.txt', '12', None)]
+    >>> normalize(['file:///a/b%20c.txt'])        # percent 编码解掉
+    [('file', '/a/b c.txt')]
+    >>> normalize(['--', 'https://example.com']) # -- 之后按字面量，链接也照旧
+    [('other', '--'), ('other', 'https://example.com')]
     >>> normalize(['--', 'a.txt:3'])         # -- 之后按字面量
     [('other', '--'), ('other', 'a.txt:3')]
     """
@@ -1295,7 +1310,7 @@ def normalize(args: list[str]) -> list[Token]:
             out.append(('opt', a, field, values))
             continue
 
-        out.append(arg_token(a))
+        out.append(positional_token(a))
 
     return out
 
@@ -1317,6 +1332,17 @@ def has_wait(tokens: list[Token]) -> bool:
         match t:
             case ('opt', _, 'wait', _):
                 return True
+
+            # 其余一律有意忽略：别的选项、文件、目录、链接、认不出的
+            case ('opt', _, _, _):
+                pass
+            case ('file' | 'folder' | 'external' | 'other', _):
+                pass
+            case ('goto', _, _, _):
+                pass
+
+            case _:
+                raise AssertionError('未处理的 token: %r' % (t,))
     return False
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
@@ -1449,6 +1475,47 @@ def open_request(args, marker=None):
     return to_msg(normalize(args), marker)
 
 
+def has_open_target(tokens: list[Token]) -> bool:
+    """有没有"能打开的东西"：文件 / 目录 / 跳转目标 / 带取值的选项 / 认不出的字面量
+
+    认不出的（('other', …)）也算有 —— 它走的是"交回 CLI"那条路，不是"没东西可开"。
+    链接（('external', …)）**不算**：它走 open_uris 那条单独的路，不进 open 报文（main
+    摘走链接后用这个判"还剩东西可开吗"）。
+
+    >>> has_open_target(normalize(['a.txt']))
+    True
+    >>> has_open_target(normalize(['/tmp']))
+    True
+    >>> has_open_target(normalize(['--wait']))       # 开关自己不算目标
+    False
+    >>> has_open_target(normalize(['-r']))            # 同上
+    False
+    >>> has_open_target(normalize(['https://example.com']))
+    False
+    >>> has_open_target(normalize(['a.txt:3']))            # 带行号跳转也算目标
+    True
+    """
+
+    for t in tokens:
+        match t:
+            # 算目标的：文件 / 目录 / 认不出的参数 / 带行号跳转
+            case ('file' | 'folder' | 'other', _):
+                return True
+            case ('goto', _, _, _):
+                return True
+            case ('opt', _, _, values) if values:   # 带取值的选项（-m 的 path1..result）
+                return True
+            # 有意不算：链接走 openExternal 自己那条路；选项空着等于光开关
+            case ('opt', _, _, []):
+                pass
+            case ('external', _):
+                pass
+            case _:
+                raise AssertionError('未处理的 token: %r' % (t,))
+
+    return False
+
+
 def action_but_no_target(tokens):
     """NEEDS_TARGET 里的选项（--wait / -a）出现、却没有任何可开的目标（file /
     folder / goto / other / 带取值的选项）时，返回 (True, 这些选项实际敲的 flag)，否则
@@ -1457,6 +1524,7 @@ def action_but_no_target(tokens):
 
     认不出的 token（('other', …)）算"有东西"，-- 之后的字面量也在其中；-m 那类带取值的
     选项也算有目标。空着（连 other 都没有）且没给 NEEDS_TARGET 选项，不在这里报。
+    「有没有目标」那一段与 has_open_target 同一套判据，所以直接共用它。
 
     >>> action_but_no_target(normalize(['--wait']))              # NEEDS_TARGET 无目标
     (True, ['--wait'])
@@ -1473,20 +1541,24 @@ def action_but_no_target(tokens):
     """
 
     flags = []
-    has_target = False
+
     for t in tokens:
         match t:
-            case ('other', _):
-                has_target = True
-            case ('file' | 'folder' | 'goto', _):
-                has_target = True
-            case ('opt', _, _, values) if values:   # 带取值的选项（-m 的 path1..result）
-                has_target = True
             case ('opt', flag, field, _) if field in NEEDS_TARGET:
                 flags.append(flag)
+            # 其余一律有意忽略：非 NEEDS_TARGET 选项、文件、目录、链接、认不出的
+            case ('opt', _, _, _):
+                pass
+            case ('file' | 'folder' | 'external' | 'other', _):
+                pass
+            case ('goto', _, _, _):
+                pass
+            case _:
+                raise AssertionError('未处理的 token: %r' % (t,))
 
-    if flags and not has_target:
+    if flags and not has_open_target(tokens):
         return True, flags
+
     return False, None
 
 
@@ -1505,6 +1577,8 @@ def wait_but_no_file(tokens):
     (False, None)
     >>> wait_but_no_file(normalize(['-a', '/tmp']))               # 不是 --wait
     (False, None)
+    >>> wait_but_no_file(normalize(['--wait', 'a.txt:12']))  # 带行号文件也是文件
+    (False, None)
     """
 
     wait_flag = has_file = False
@@ -1512,8 +1586,15 @@ def wait_but_no_file(tokens):
         match t:
             case ('opt', flag, 'wait', _):
                 wait_flag = flag
-            case ('file' | 'goto', _):
+            case ('opt', _, _, _):
+                pass
+            case ('file', _) | ('goto', _, _, _):  # 带行号文件也是文件
                 has_file = True
+            # 有意不算文件：目录、链接、认不出的参数、别的选项
+            case ('folder' | 'external' | 'other', _):
+                pass
+            case _:
+                raise AssertionError('未处理的 token: %r' % (t,))
 
     return (True, wait_flag) if (wait_flag and not has_file) else (False, None)
 
@@ -1677,6 +1758,11 @@ def to_msg(tokens: list[Token], marker: str | None = None) -> OpenMsg | None:
 
     for t in tokens:
         match t:
+            case ('external', _):
+                return None                 # 链接不走 open 报文（main 早摘走单独发
+                                            # openExternal；这里返回 None 是"这份报文
+                                            # 表达不了"，不是"交回 CLI"）
+
             case ('other', _):
                 return None                 # 认不出来：交回 CLI
 
@@ -1955,7 +2041,7 @@ class Reply(NamedTuple):
 
     **为什么不重试另一个窗口**：`raw_request` 失败可能是"根本没发出去"（connect 阶段
     ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）——
-    后者重发会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页），
+    后者重发会在另一个窗口**再开一次**同一个文件（链接则多开一个标签页），
     那不是浪费，是有副作用的重试。要安全重试，得先能区分这两段（把 connect 与
     send/recv 分开报），那是另一个改法，先不换窗口。
     """
@@ -2484,7 +2570,9 @@ def ask_socket(socks, colored: bool = False):
     return chosen
 
 # 链接的样子：scheme://…（http / https / file…），外加 mailto: / tel: 这两个不带 // 的。
-# 只用来校验 --open 的取值，不改写它 —— 不像链接就报错，别悄悄拿去当文件名打开。
+# 判据只有两处用：normalize 的位置参数（像链接就交给浏览器）与 main 里的报错，所以
+# 不像链接的参数照旧当文件名 —— 不改写它，也别悄悄塞进 fileURIs（那会变成
+# file:///当前目录/https:/… 这种畸形路径）。
 # 不认 localhost:8080/x（没有 scheme）：那种写全 https:// 就好。
 URI_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://|mailto:|tel:)')
 
@@ -2506,6 +2594,57 @@ def is_uri(s: str) -> bool:
     """
 
     return bool(URI_RE.match(s))
+
+
+def file_url_to_path(url: str) -> str:
+    """file:// 链接 -> 本地路径（percent 编码解掉），跟 vim 的 file:// 一个意思
+
+    只认本机：主机部分必须为空（file:///abs/path）或 localhost。写成 file://host/path
+    的是"另一台机器上的文件"，那不是本地路径，报错说清楚——别猜成相对路径。
+
+    >>> file_url_to_path('file:///a/b.txt')
+    '/a/b.txt'
+    >>> file_url_to_path('file://localhost/a/b.txt')
+    '/a/b.txt'
+    >>> file_url_to_path('file:///a/b%20c.txt')     # percent 编码
+    '/a/b c.txt'
+    >>> file_url_to_path('file:///a/b.txt?x=1')     # query 对本地文件没意义，丢掉
+    '/a/b.txt'
+    """
+
+    parts = urllib.parse.urlsplit(url)
+
+    if parts.netloc not in ('', 'localhost'):
+        raise NormalizeError('file:// 带了主机名 %s，edit 只认本机路径'
+                             '（要的是 file:///绝对路径）' % parts.netloc)
+
+    return urllib.parse.unquote(parts.path)
+
+
+def positional_token(a: str) -> Token:
+    """位置参数 -> token：先认链接，剩下的走 arg_token（跳转 / 目录 / 文件）
+
+    放在 normalize 后面定义、却由它调用（运行期解析，模块加载顺序无所谓），是为了让
+    链接那套判据（is_uri / file_url_to_path）留在 URI_RE 那一组里，不拆到两处。
+
+    file:// 落回本地路径后照旧交给 arg_token，所以 file:///p/a.txt:12 照样跳行 ——
+    与 vim 的 file:// 一样，链接只是另一种写法，不是另一类东西。
+
+    >>> positional_token('https://example.com')
+    ('external', 'https://example.com')
+    >>> positional_token('file:///a/b.txt')
+    ('file', '/a/b.txt')
+    >>> positional_token('a.txt:3')
+    ('goto', 'a.txt', '3', None)
+    """
+
+    if is_uri(a):
+        if a.startswith('file:'):
+            return arg_token(file_url_to_path(a))
+
+        return ('external', a)
+
+    return arg_token(a)
 
 
 class OpenExternalMsg(TypedDict):
@@ -2531,8 +2670,8 @@ def open_external_msg(uris: list[str]) -> OpenExternalMsg:
     return {'type': 'openExternal', 'uris': list(uris)}
 
 
-# BROWSER 写的是自己时就跳过：BROWSER='edit --open' 又正好没有窗口可直连时，
-# 一路 exec 回自己会一圈接一圈停不下来
+# BROWSER 写的是自己时就跳过：BROWSER='edit' 又正好没有窗口可直连时，
+# 一路 exec 回自己会一圈接一圈停不下来（链接 edit 自己就认，所以这个自指真会绕）
 EDIT_NAMES = ('edit', 'edit.py')
 # IDE 自家的 browser.sh（macOS / Linux remote 的 helper 都叫这个）内部还是调
 # server-cli.js -> 同一个 socket，等于把直连失败换个进程再犯一遍，没有任何收益；
@@ -2544,12 +2683,12 @@ def find_browser() -> list[str] | None:
     """打开链接的兜底程序：$BROWSER（可带参数），再是 xdg-open / open
 
     BROWSER 的写法和 fish 的 help 一致：整串按 shell 词切开，链接追加在后面
-    （`BROWSER='edit --open'` -> `edit --open <链接>`）。
+    （`BROWSER='edit'` -> `edit <链接>`，而链接 edit 自己就认得出来）。
 
     >>> os.environ['BROWSER'] = 'true -a'
     >>> find_browser() == [shutil.which('true'), '-a']
     True
-    >>> os.environ['BROWSER'] = 'edit --open'       # 是自己：跳过，别自己调自己
+    >>> os.environ['BROWSER'] = 'edit'             # 是自己：跳过，别自己调自己
     >>> find_browser() is None or os.path.basename(find_browser()[0]) != 'edit'
     True
     >>> os.environ['BROWSER'] = '/opt/codebuddy/bin/helpers/browser.sh'  # IDE 自家的
@@ -2575,20 +2714,27 @@ def find_browser() -> list[str] | None:
 
 
 def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
-              flags: argparse.Namespace) -> None:
-    """--open 的执行：先直连窗口发 openExternal，不行再退 CLI / 系统浏览器
+              flags: argparse.Namespace, keep_alive: bool = False) -> None:
+    """链接的执行：先直连窗口发 openExternal，不行再退 CLI / 系统浏览器
 
     sock 是 main 已经定下来的"当前窗口"（--interactive / --first 也走那条路）；
     why_cli 是"为什么没直连"，只在选中的是 remote-cli 时用来换一句能照做的提示。
+
+    keep_alive：除了链接后**还有文件要开**。这时 CLI / 浏览器那一级不能
+    execv（进程被换掉，main 里的文件就丢了），改成起子进程：fire-and-forget，
+    不等它发完 —— 等的话会被 node 启动的那一秒拖住，文件就开晚了；代价是链接与
+    文件到达窗口的先后不再保证（只影响"先开浏览器还是先开编辑器"，两个都会开）。
+    纯链接（keep_alive=False）照旧 execv，退出码就是浏览器 / CLI 的。
 
     三条路打印/执行的东西和 main 那两条一致：--dry-run 打报文或命令行，
     真跑的也记进 --debug。
     """
 
-    msg = open_external_msg(uris)
-    window_failed = False               # 窗口那条路失败了吗（失败就跳过 code 系 CLI）
+    socket_failed = False   # socket消息发送失败了吗（失败就跳过 code 系 CLI）
 
     if sock:
+        msg = open_external_msg(uris)
+
         req = 'socket %s %s' % (sock, json.dumps(msg, ensure_ascii=False))
 
         if flags.dry_run:
@@ -2603,28 +2749,40 @@ def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
 
         # 窗口这条路不通：说清原因，然后**跳过 code 系 CLI 那一级**（它是同一个 socket，
         # 必然再失败一次，只白起一次 node），直接落系统浏览器 —— 那是另一个通道，
-        # 不依赖窗口，`--open` 本来就是"把链接交给系统浏览器"的意思
-        sys.stderr.write('edit --open: %s\n' % reply_failure(reply))
-        sys.stderr.write('edit --open: 改用系统浏览器\n')
+        # 不依赖窗口，链接本来就是"交给系统浏览器"的意思
+        sys.stderr.write('edit: 打开链接：%s\n' % reply_failure(reply))
+        sys.stderr.write('edit: 改用系统浏览器\n')
         why_cli = reply_failure(reply)
-        window_failed = True
+        socket_failed = True
 
     cli = find_cli()
     kind = cli_kind(cli[0]) if cli else None
 
-    # code 系自己就有 --openExternal（和直连是同一件事，只是要起一次 node）；
-    # 别的 CLI（vim / $EDITOR…）没有这个概念，那就退回系统浏览器 —— 链接不需要
-    # 按 kind 翻译，原样追加在后面就行
-    if cli and kind == CLI_KIND_CODE and not window_failed:
-        if why_cli and have_remote_cli(os.path.dirname(cli[0])):
-            sys.stderr.write(hint_remote_cli(why_cli))
+    argv: list[str] | None = None
 
-        argv = cli + ['--openExternal'] + uris
-    else:
+    # code 系自己就有 --openExternal（和直连是同一件事，只是要起一次 node）。
+    # socket 直连刚失败就别试它了（同一个 socket，必然再败一次）；另外
+    # server 端 remote-cli 只认 IDE 集成终端：环境里没 hook 时它必被拒
+    # （find_remote_cli 本会为此不入选，EDIT_CLI 显式点名才绕得过那道自检）
+    if cli and kind == CLI_KIND_CODE and not socket_failed:
+        # have_remote_cli / current_socket 的 4 种组合（→ 怎么处理）：
+        #   有 / 有：IDE 终端里的 server 端 CLI    → 走 --openExternal
+        #   有 / 无：搁浅——没 hook，它必被拒        → 提示一句，下面落系统浏览器
+        #   无 / 有：IDE 终端里的桌面 code CLI     → 走 --openExternal
+        #   无 / 无：桌面 code CLI（electron 桌面 IPC，不靠 hook）→ 走
+        if have_remote_cli(os.path.dirname(cli[0])) and not current_socket():
+            if why_cli and not flags.dry_run:
+                sys.stderr.write(hint_remote_cli(why_cli))
+            sys.stderr.write('edit: 改用系统浏览器\n')
+        else:
+            argv = cli + ['--openExternal'] + uris
+
+    # 别的 CLI（vim / $EDITOR…）没有 openExternal 这个概念，上面搁浅的也一样：
+    # 退回系统浏览器 —— 链接不需要按 kind 翻译，原样追加在后面就行
+    if argv is None:
         browser = find_browser()
-
         if not browser:
-            sys.exit('edit --open: 没有 IDE 窗口，也没有能打开链接的程序'
+            sys.exit('edit: 没有 IDE 窗口，也没有能打开链接的程序'
                      '（设 %s，或装 xdg-open）' % BROWSER)
 
         argv = browser + uris
@@ -2633,6 +2791,13 @@ def open_uris(uris: list[str], sock: str | None, why_cli: str | None,
 
     if flags.dry_run:
         print(line)
+        return
+
+    if keep_alive:
+        # main 后面还要开文件：起子进程而不是 exec，扔后台不阻塞，main 接着开文件
+        logger.debug('spawn %s', line)
+        subprocess.Popen(argv)
+
         return
 
     logger.debug('exec %s', line)
@@ -2703,7 +2868,6 @@ def build_args():
     parser.add_argument('--first', action='store_true')
     parser.add_argument('--prune', action='store_true')
     parser.add_argument('--interactive', action='store_true')
-    parser.add_argument('--open', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--usage', action='store_true')
@@ -2771,18 +2935,6 @@ def main():
 
         print_prune(flags.dry_run)
         return
-
-    # --open 的取值是链接，不走下面"文件参数"那套翻译；先在这里校验：
-    # 和 -d 空着那个判定同一个位置（挑窗口之前），免得挑完了才发现链接不对
-    if flags.open:
-        if not args:
-            sys.exit('edit --open: 后面没有链接'
-                     '（edit --open https://fishshell.com/docs/）')
-
-        bad = [a for a in args if not is_uri(a)]
-
-        if bad:
-            sys.exit('edit --open: 不像链接（要带 ://）：%s' % ' '.join(bad))
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv（纯函数，先扫出来）
     try:
@@ -2917,10 +3069,21 @@ def main():
         why_cli = '没有 %s' % IPC_HOOK
         logger.debug('no %s, falling back to cli', IPC_HOOK)
 
-    # --open 到这儿才发：窗口已经定下来（--interactive / --first 走的还是上面那条
-    # 路），链接也不用再过一遍文件参数那套翻译
-    if flags.open:
-        return open_uris(args, sock, why_cli, flags)
+    # 链接（https://… / mailto: …）走 openExternal，不进编辑器；file:// 已在 normalize
+    # 里落成本地路径，所以摘出来的都是真链接。到这儿才发：窗口已经定下来
+    # （--interactive / --first 走的还是上面那条路）
+    uris = [t[1] for t in tokens if t[0] == 'external']
+
+    if uris:
+        rest: list[Token] = [t for t in tokens if t[0] != 'external']
+        # 判一次就够：还有文件要开就告诉 open_uris（那一级得起子进程，不能 exec 把自己
+        # 换掉），没有就收工 —— 别算两遍，免得以后两处判据各改一处
+        more = has_open_target(rest)
+        open_uris(uris, sock, why_cli, flags, more)
+        tokens = rest
+
+        if not more:
+            return                          # 只给了链接：浏览器开完就收工
 
     # --wait 要先造 marker（窗口关文件时删它），造不出来就交回 CLI
     marker = make_marker() if sock and has_wait(tokens) else None

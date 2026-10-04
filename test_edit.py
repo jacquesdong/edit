@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from io import StringIO
@@ -1497,7 +1498,7 @@ class ProtocolFixtureTest(unittest.TestCase):
                 self.assertEqual(got, want)
 
     def test_open_external_matches_cli(self):
-        """openExternal 那条（--open 用的）：字段与取值都和 CLI 一致"""
+        """openExternal 那条（链接走的那条）：字段与取值都和 CLI 一致"""
 
         case = self.cases()['open-external']
 
@@ -1611,7 +1612,7 @@ class WaitTest(EditCase):
 
 
 class OpenExternalTest(ProcCase):
-    """--open：链接走 openExternal 报文，不是 open 的 fileURIs
+    """链接：normalize 认出来就归浏览器（openExternal 报文），不是 open 的 fileURIs
 
     多数用例走子进程（run_edit，EDIT_CLI 指向假 CLI）；"没有程序能开链接"那条
     要在进程内跑（run_main）—— 那之后就是 exec，测试进程不能真被换掉。
@@ -1638,14 +1639,30 @@ class OpenExternalTest(ProcCase):
 
         return self.fake_cli
 
+    def log_cli(self, name):
+        """假 CLI：把**每次**调用追加进 $FAKE_CLI_LOG，退出 7
+
+        与 _script 的区别是"追加"：那台 CLI 一次 edit 里可能被调两次（混给文件时先
+        --openExternal、再接文件），写 $FAKE_CLI_OUT 会把上一次覆盖掉，就看不出顺序了。
+        """
+
+        path = os.path.join(self.dir, name)
+
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_CLI_LOG"\nexit 7\n')
+
+        os.chmod(path, 0o755)
+
+        return path
+
     def test_sent_to_window(self):
-        msg = self.open_msg('--open', self.URL)
+        msg = self.open_msg(self.URL)
 
         self.assertEqual(msg, {'type': 'openExternal', 'uris': [self.URL]})
 
     def test_many_uris(self):
         win = self.add_window()
-        proc = self.run_edit('--open', self.URL, 'https://example.com/x',
+        proc = self.run_edit(self.URL, 'https://example.com/x',
                              hook=win.path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -1655,7 +1672,7 @@ class OpenExternalTest(ProcCase):
 
     def test_dry_run_prints_socket_json(self):
         self.win = self.add_window()
-        proc = self.run_edit('--dry-run', '--open', self.URL, hook=self.win.path)
+        proc = self.run_edit('--dry-run', self.URL, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
@@ -1675,7 +1692,7 @@ class OpenExternalTest(ProcCase):
         self.code_cli()
         browser = self._script('my-browser')
         win = self.add_window(code=500, body='boom')
-        proc = self.run_edit('--open', self.URL, hook=win.path,
+        proc = self.run_edit(self.URL, hook=win.path,
                              extra_env={'BROWSER': browser})
 
         self.assertEqual(proc.returncode, 7, proc.stderr)
@@ -1689,7 +1706,7 @@ class OpenExternalTest(ProcCase):
         self.code_cli()
 
         with patch.object(edit, 'OPENERS', ()):
-            out, _, code = self.run_main('--open', self.URL,
+            out, _, code = self.run_main(self.URL,
                                          extra_env={'BROWSER': ''},
                                          hook=self.add_window(silent=True).path)
 
@@ -1700,10 +1717,53 @@ class OpenExternalTest(ProcCase):
         """没有窗口、CLI 也不是 code 系（假 CLI 谁都不认）：走 $BROWSER"""
 
         browser = self._script('my-browser')
-        proc = self.run_edit('--open', self.URL, extra_env={'BROWSER': browser})
+        proc = self.run_edit(self.URL, extra_env={'BROWSER': browser})
 
         self.assertEqual(proc.returncode, 7, proc.stderr)
         self.assertEqual(self.cli_args(), self.URL, '链接原样追加在 BROWSER 后面')
+
+    def test_stranded_remote_cli_skipped_to_browser(self):
+        """EDIT_CLI 显式点名 remote-cli、但没有 hook：它必被拒，直接落系统浏览器"""
+
+        # 拼一个 server 端结构：ide/bin/remote-cli/code + ide/bin/node
+        # （have_remote_cli 看的就是 remote-cli/../../node）
+        remote_dir = os.path.join(self.dir, 'ide', 'bin', 'remote-cli')
+        os.makedirs(remote_dir, exist_ok=True)
+
+        stranded_marker = os.path.join(self.dir, 'remote-ran.txt')
+        code_exe = os.path.join(remote_dir, 'code')
+        with open(code_exe, 'w') as f:
+            f.write('#!/bin/sh\ntouch "$STRANDED_MARKER"\nexit 0\n')
+        os.chmod(code_exe, 0o755)
+
+        node_exe = os.path.join(self.dir, 'ide', 'bin', 'node')
+        with open(node_exe, 'w') as f:
+            f.write('#!/bin/sh\nexit 0\n')
+        os.chmod(node_exe, 0o755)
+
+        browser = os.path.join(self.dir, 'my-browser')
+        browser_out = os.path.join(self.dir, 'browser-args.txt')
+        with open(browser, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_BROWSER_OUT"'
+                    '\nexit 0\n')
+        os.chmod(browser, 0o755)
+
+        if os.path.exists(stranded_marker):
+            os.remove(stranded_marker)
+
+        proc = self.run_edit(
+            self.URL,
+            extra_env={'EDIT_CLI': code_exe, 'BROWSER': browser,
+                       'FAKE_BROWSER_OUT': browser_out,
+                       'STRANDED_MARKER': stranded_marker})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(stranded_marker),
+                         'remote-cli 没 hook，不该白跑')
+        with open(browser_out) as f:
+            self.assertEqual(f.read(), self.URL, '链接落系统浏览器')
+        self.assertIn('remote-cli 只认', proc.stderr)
+        self.assertIn('改用系统浏览器', proc.stderr)
 
     def test_browser_env_may_take_args(self):
         """$BROWSER 可以带参数（fish 的 help 就是这么调的）：切成 argv 再拼链接"""
@@ -1712,35 +1772,152 @@ class OpenExternalTest(ProcCase):
             self.assertEqual(edit.find_browser(), [shutil.which('true'), '-a'])
 
     def test_browser_pointing_at_itself_is_skipped(self):
-        """BROWSER 是 'edit --open' 时跳过：没有窗口可直连会一圈圈 exec 回自己"""
+        """BROWSER 是 'edit' 时跳过：没有窗口可直连会一圈圈 exec 回自己"""
 
-        with patch.dict(os.environ, {'BROWSER': 'edit --open'}):
+        with patch.dict(os.environ, {'BROWSER': 'edit'}):
             with patch.object(edit, 'OPENERS', ()):     # 断掉兜底，结果才是确定的
                 self.assertIsNone(edit.find_browser())
 
-    def test_not_a_uri(self):
-        """不像链接就报错，不悄悄拿去当文件打开"""
+    def test_file_url_opens_local_file(self):
+        """file:// 当本地文件（同 vim 的 file://$PWD/README.md），:行号照旧认"""
 
-        for args in (['--open', 'a.txt:3'], ['--open', self.a],
-                     ['--open', self.URL, 'b.txt']):
-            with self.subTest(args):
-                proc = self.run_edit(*args)
+        self.assertEqual(edit.normalize(['file://' + self.a]), [('file', self.a)])
+        self.assertEqual(edit.normalize(['file://' + self.b + ':3']),
+                         [('goto', self.b, '3', None)])
 
-                self.assertEqual(proc.returncode, 1, proc.stderr)
-                self.assertIn('不像链接', proc.stderr)
-                self.assertIsNone(self.cli_args(), '不该交给 CLI')
+        msg = self.open_msg('file://' + self.a)
 
-    def test_without_uri(self):
-        proc = self.run_edit('--open')
+        self.assertEqual(msg['type'], 'open')
+        self.assertEqual(msg['fileURIs'], ['file://' + self.a])
+
+    def test_file_url_with_host_is_rejected(self):
+        """file:// 带了主机名就不是本地路径：报错说清，不猜成相对路径"""
+
+        proc = self.run_edit('file://elsewhere/a.txt')
 
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn('后面没有链接', proc.stderr)
+        self.assertIn('只认本机路径', proc.stderr)
+        self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_file_and_url_both_done(self):
+        """混着给：链接先走 openExternal，文件照常开（两个请求，各走各那条路）"""
+
+        win = self.add_window()
+        proc = self.run_edit(self.a, self.URL, hook=win.path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([r['type'] for r in win.requests],
+                         ['openExternal', 'open'])
+        self.assertEqual(win.requests[0]['uris'], [self.URL])
+        self.assertEqual(win.requests[1]['fileURIs'], ['file://' + self.a])
+
+    def test_goto_and_url_both_done(self):
+        """带行号文件 + 链接：也得两个请求（has_open_target 不能漏 goto）"""
+
+        win = self.add_window()
+        proc = self.run_edit(self.a + ':12', self.URL, hook=win.path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([r['type'] for r in win.requests],
+                         ['openExternal', 'open'])
+        self.assertEqual(win.requests[0]['uris'], [self.URL])
+        self.assertEqual(win.requests[1]['fileURIs'],
+                         ['file://' + self.a + ':12'])
+        self.assertTrue(win.requests[1]['gotoLineMode'])
+
+    def test_wait_file_url_goto_not_misuse(self):
+        """--wait + file://…:行号：带行号文件也是文件，两个检测器都不该误报"""
+
+        target = 'file://' + self.b + ':3'
+        self.assertEqual(
+            edit.wait_but_no_file(edit.normalize(['--wait', target])),
+            (False, None))
+
+        # 端到端（无窗口，假 CLI 谁都不认）：行号被 goto 翻译摘掉，路径交给 CLI
+        proc = self.run_edit('--wait', target)
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertEqual(self.cli_args(), self.b)
+
+    def test_file_and_url_no_window_does_both(self):
+        """没窗口：浏览器后台开链接，main 继续把文件交给 CLI —— 文件不静默丢弃"""
+
+        browser = os.path.join(self.dir, 'my-browser')
+        browser_out = os.path.join(self.dir, 'browser-args.txt')
+
+        # 浏览器记录写进单独的文件：它和假 CLI 同时跑，不能共用 FAKE_CLI_OUT
+        with open(browser, 'w') as f:
+            f.write('#!/bin/sh\nprintf "%s" "$*" > "$FAKE_BROWSER_OUT"'
+                    '\nexit 0\n')
+
+        os.chmod(browser, 0o755)
+
+        proc = self.run_edit(self.a, self.URL,
+                             extra_env={'BROWSER': browser,
+                                        'FAKE_BROWSER_OUT': browser_out})
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)       # 假 CLI 以 7 退出
+        self.assertEqual(self.cli_args(), self.a, '文件照旧交给 CLI')
+
+        # 浏览器是后台 Popen：轮询它落下的记录（5s 足够）
+        for _ in range(100):
+            if os.path.exists(browser_out):
+                break
+            time.sleep(0.05)
+
+        with open(browser_out) as f:
+            self.assertEqual(f.read(), self.URL, '链接后台交给浏览器')
+
+    def test_dry_run_no_window_lists_both_actions(self):
+        """无窗口 --dry-run：链接与文件两行都列出（与真实执行不再有分叉）"""
+
+        browser = self._script('my-browser')
+        proc = self.run_edit('--dry-run', self.a, self.URL,
+                             extra_env={'BROWSER': browser})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = proc.stdout.strip().split('\n')
+        self.assertEqual(len(lines), 2, proc.stdout)
+        self.assertTrue(lines[0].endswith(self.URL), lines[0])
+        self.assertTrue(lines[1].endswith(self.a), lines[1])
+
+    def test_code_cli_and_file_no_window_both_done(self):
+        """无窗口 + code 系 CLI + 混给文件：CLI 收 --openExternal、文件照旧交给它
+
+        这一级只能起子进程（execv 会把进程换掉、文件那份就丢了）。是 fire-and-forget
+        的 Popen，所以**不断言两次调用的先后** —— 那个保证已经没有了（见 open_uris
+        的 keep_alive 一段）；要守的是"两次都发生了，且各自带对参数"。
+        """
+
+        # 追加写日志而不是像 _script 那样写 $FAKE_CLI_OUT：要看的正是"被调了两次"
+        log = os.path.join(self.dir, 'cli-log')
+        cli = self.log_cli('buddycn')
+
+        proc = self.run_edit(self.a, self.URL,
+                             extra_env={'EDIT_CLI': cli, 'FAKE_CLI_LOG': log})
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)   # 最后一手是 execv，退出码来自 CLI
+
+        with open(log) as f:
+            calls = f.read().splitlines()
+
+        self.assertEqual(sorted(calls),
+                         sorted(['--openExternal ' + self.URL, self.a]),
+                         '两次调用都得在：一次带 --openExternal、一次带文件')
+
+    def test_plain_file_is_not_a_url(self):
+        """回归：不像链接的参数照旧当文件名，别被"隐式识别"顺手改掉"""
+
+        msg = self.open_msg(self.a)
+
+        self.assertEqual(msg['type'], 'open')
+        self.assertEqual(msg['fileURIs'], ['file://' + self.a])
 
     def test_no_way_to_open(self):
         """没有窗口、CLI 不是 code 系、BROWSER 与兜底都没有：报错退出，不 exec"""
 
         with patch.object(edit, 'OPENERS', ()):
-            out, _, code = self.run_main('--open', self.URL,
+            out, _, code = self.run_main(self.URL,
                                          extra_env={'EDIT_CLI': '/bin/true',
                                                     'BROWSER': ''})
 

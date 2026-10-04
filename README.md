@@ -19,8 +19,9 @@ edit <文件...>               在当前 IDE 窗口打开文件
 edit <文件:行号[:列]>         跳到指定位置（VS Code 系用 --goto，vim 系用 +行号）
 edit --wait <文件>           等文件在编辑器里被关掉才返回（当 $EDITOR / core.editor 用）
 edit -m <文件> <文件> <base> <结果>   三向合并（VS Code 系的 --merge）
-edit --open <链接...>        把链接交给系统（本地）浏览器打开，不起 node
-                             （fish: set -Ux BROWSER 'edit --open'，help 就走它）
+edit <链接...>               参数像链接（带 :// 或 mailto: / tel:）就交给系统（本地）
+                             浏览器打开，不起 node（file:// 除外，当本地文件路径处理）
+                             （fish: set -Ux BROWSER 'edit'，help 就走它）
 edit --init fish | source    把 hook 和 remote-cli 目录导入当前 shell
 eval "$(edit --init bash)"   同上（bash / sh / dash）
 
@@ -55,14 +56,16 @@ edit --color=always …            给输出上色（窗口表的表头、当前
 **永远不上色**（前者要被 `source`、后者 fzf 没加 `--ansi` 会把转义画出来）。配色与
 三态判据移植自 `fixcomm-py` 的 `c3ebf44`，取舍记在 NOTES。
 
-`--open` 走的是第三种报文 `{"type":"openExternal","uris":[…]}`（remote-cli 的
+链接走的是第三种报文 `{"type":"openExternal","uris":[…]}`（remote-cli 的
 `--openExternal` 就是它，IDE 的 `bin/helpers/browser.sh` 也是这么开网页的）：链接不是
-文件，塞进 `fileURIs` 会变成 `file:///当前目录/https:/…`，所以它单独一条路 —— 取值
-原样当 `uris` 发出去，不像链接（没有 `://`）直接报错退出，不悄悄拿去当文件打开。
+文件，塞进 `fileURIs` 会变成 `file:///当前目录/https:/…`，所以它单独一条路 ——
+参数里像链接的（`normalize` 用 `is_uri` 认：带 `://`，或 `mailto:` / `tel:`）原样当
+`uris` 发出去；不像链接的照旧当文件名。`file://` 是例外，decode 成路径后当本地文件
+处理（所以 `edit file://$PWD/README.md` 开的就是那个文件，`:行号` 也照旧认）。
 直连不上时退回两级：code 系 CLI 加 `--openExternal`（和直连等价，只是要起一次 node），
 别的 CLI（vim / `$EDITOR`…）就退 `$BROWSER`（fish 的 `help` 认的那个变量，可带参数），
 再不行是 `xdg-open`（macOS 才是 `open`：Debian 的 `/usr/bin/open` 是 run-mailcap，吃
-文件不吃链接）。`BROWSER` 写的是 `edit --open` 自己时跳过 —— 没有窗口可直连时会一圈圈
+文件不吃链接）。`BROWSER` 写的是 `edit` 自己时跳过 —— 没有窗口可直连时会一圈圈
 exec 回来。
 
 名字有个撞车要心里有数：Debian / Ubuntu 的 `mime-support` 自带 `/usr/bin/edit`

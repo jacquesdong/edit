@@ -35,7 +35,7 @@ Content-Length: 189
 |---|---|---|
 | `open` | 开文件 / 文件夹、diff、merge、add | JSON |
 | `status` | 让**窗口**跑 `_remoteCLI.getSystemStatus`，返回诊断文本 | JSON 字符串 |
-| `openExternal` | 交给系统打开 URL（`--open` 用的，见下） | JSON |
+| `openExternal` | 交给系统打开 URL（链接走这条，见下） | JSON |
 | `extensionManagement` | 装/卸扩展 | JSON |
 
 `remote-cli` 的收包逻辑（抓自 `server-cli.js`）：读完整回复 → `JSON.parse` →
@@ -102,13 +102,13 @@ stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解�
 | **被拒** `refused` | 404 / 500 / 坏正文 | **退出**并说原因（窗口活着但不认这条报文，换个 code 系 CLI 也是同一个服务端） | 交回那个编辑器（**另一个通道**），先打一行说明为什么退 |
 | **连不上** `unreachable` | connect 失败，**或**回复连 HTTP 头都没有（`http_code` 为 0 —— silent 窗口就是这种） | 同上 | 同上 |
 
-`--open` 单独一档：窗口失败时**跳过 code 系 CLI 的 `--openExternal`**（同一 socket，白起
-node），直落 `$BROWSER` / `xdg-open` —— 系统浏览器是另一个通道、不依赖窗口，而 `--open`
-本来就是"把链接交给系统浏览器"的意思。两者都没有才退出。
+链接单独一档：窗口失败时**跳过 code 系 CLI 的 `--openExternal`**（同一 socket，白起
+node），直落 `$BROWSER` / `xdg-open` —— 系统浏览器是另一个通道、不依赖窗口，而链接
+本来就是"交给系统浏览器"的意思。两者都没有才退出。
 
 **为什么不换窗口重试**（试过，结论是不做）：`raw_request` 失败可能是"根本没发出去"（connect
 阶段 ENOENT / ECONNREFUSED），也可能是"已经发出去了、只是回包慢"（recv 超时）—— 后者重发
-会在另一个窗口**再开一次**同一个文件（`--open` 则多开一个标签页）。那不是浪费，是**有副作用
+会在另一个窗口**再开一次**同一个文件（链接则多开一个标签页）。那不是浪费，是**有副作用
 的重试**。要安全重试得先能区分这两段（connect 与 send/recv 分开报），而窄收益不值：残留
 socket 本来就进不了候选（`load_sockets()` 只认 `/proc/net/unix` 里还 bind 着的），剩下的
 只有"列完到发之间窗口刚好死"这种竞态。
@@ -491,10 +491,12 @@ edit -g /tmp/a.txt:3 /tmp/b.txt:9
 多个文件各带行号（`edit a.txt:3 b.txt:9`）vim 只会把两个 `+N` 依次用在第一个
 buffer 上 —— 只有位置参数的版本里就已经是这样，不是这次引入的。
 
-### `--open`：链接走 openExternal（协议里第四种 type）
+### 链接：走 openExternal（协议里第四种 type）
 
-`edit --open <链接…>` 发的是 `{"type":"openExternal","uris":[…]}`，**不是** open 报文 ——
-就是上面那张表里的第四种，之前没接线。链接不是文件：塞进 `fileURIs` 会变成
+参数里像链接的（`normalize` 用 `is_uri` 认）发的是 `{"type":"openExternal","uris":[…]}`，
+**不是** open 报文 —— 就是上面那张表里的第四种。没有 `--open` 那种旗标：靠参数形状认，
+`edit https://…` 就是开浏览器（省掉一个要记的开关，也不会漏了它把 `https:/…` 当文件名
+在当前目录造出一个畸形路径）。链接不是文件：塞进 `fileURIs` 会变成
 `file:///当前目录/https:/…` 这种东西，所以它单独一条路。
 
 报文形状抓自真 CLI（`fixtures/protocol.json` 的 `open-external`）：
@@ -509,13 +511,22 @@ python3 tools/capture_cli.py --name open-external -- --openExternal https://fish
 - CLI 会把 `https://example.com` 规范化成 `https://example.com/`（`URI.parse().toString()`
   补的斜杠），我们原样发 —— server 端（`server-main.js`）自己 parse，`openExternal` 里
   只有 scheme 是 `file` 的走解析（`i.scheme==="file"?i:t`），其余整串转交，补不补都一样；
-- 不像链接的取值 CLI 反而当文件（实测 `--openExternal not-a-url` 抓到
-  `file:///…/not-a-url`），我们不猜：没有 `://`（或 `mailto:` / `tel:`）就报
-  "不像链接"退出 1 —— 悄悄拿去当文件打开比报错糟。
+- 不像链接的参数 CLI 反而当文件（实测 `--openExternal not-a-url` 抓到
+  `file:///…/not-a-url`），我们按形状认：一律当文件名，**不**报错。所以
+  `edit not-a-url` 与 `code --openExternal not-a-url` 的结果一样（都开成文件），
+  只是我们不用先敲旗标。
 
-取值**不进 token 流水线**：不认行号、不转绝对路径、也不按 kind 翻译（链接不需要
-`--goto` / `+N` 那套），也不参与 `-a` / `-d` "有没有目标"的判定 —— 校验放在挑窗口
-之前（`--prune` 之后、`normalize` 之前），免得挑完了才发现链接不对。
+链接**要进 token 流水线**，但只进一条自己的道：normalize 把这类参数摘成
+`('external', 链接)`，不认行号、不转绝对路径、也不按 kind 翻译（链接不需要
+`--goto` / `+N` 那套）。它**不参与** `-a` / `-d` "有没有目标"的判定
+（`has_open_target` 不算它），所以 `edit -a /tmp https://x` 不会被说成"没有目标"。
+main 摘走链接先发 openExternal，再看还剩不剩东西可开：只剩链接就收工，混着给了文件
+就文件照常开（两个请求，各走各那条路）。
+
+**`file://` 当本地文件**（与 `vim file://$PWD/README.md` 同款）：`file_url_to_path`
+把 percent 编码解掉、只认空主机与 `localhost`，然后交回 `arg_token` —— 于是
+`file:///p/a.txt:12` 照样跳行。带主机名的（`file://elsewhere/a.txt`）报
+"只认本机路径"退出 1，不猜成相对路径。
 
 直连之外还有两级兜底：
 
@@ -535,17 +546,17 @@ Warning: unknown mime-type for "https://example.com/" -- using "application/octe
 Error: no such file "https://example.com/"        # 退出 2
 ```
 
-所以 Linux 的兜底只留 xdg-open（本机恰好没装，于是 `--open` 在这台机器上没有
-系统浏览器可退：没有窗口时会直接报错退出，而不是去 exec 一个必错的 run-mailcap）。
+所以 Linux 的兜底只留 xdg-open（本机恰好没装，于是链接在这台机器上没有系统浏览器
+可退：没有窗口时会直接报错退出，而不是去 exec 一个必错的 run-mailcap）。
 
-**BROWSER 写的是自己时跳过**（`EDIT_NAMES`）：`BROWSER='edit --open'` 又正好没有窗口
-可直连时，会一路 exec 回自己 —— exec 是换进程、不是 fork 炸弹，但同样一圈接一圈停不下来。
-实测走 `--dry-run`（不真开浏览器）：那一次打印的是 `/usr/bin/open https://example.com`，
-不是 `edit --open …`。
+**BROWSER 写的是自己时跳过**（`EDIT_NAMES`）：`BROWSER='edit'` 又正好没有窗口可直连时，
+会一路 exec 回自己 —— exec 是换进程、不是 fork 炸弹，但同样一圈接一圈停不下来
+（链接 edit 自己就认得出来，所以这个自指真会绕）。实测走 `--dry-run`（不真开浏览器）：
+那一次打印的是 `/usr/bin/open https://example.com`，不是 `edit …`。
 
 **内置浏览器不在这个协议里**：那四种 `type` 之外，IDE 内嵌预览只有窗口内的
 `simpleBrowser.api.open`（扩展 API / agent 工具能触发），**命令行没有对应报文**。所以
-`--open` 只能到**系统浏览器**，上面那三级兜底（CLI → `$BROWSER` → `xdg-open`）全在系统侧 ——
+链接只能到**系统浏览器**，上面那三级兜底（CLI → `$BROWSER` → `xdg-open`）全在系统侧 ——
 "在 IDE 窗口里预览"这条路命令行走不通，别再找第四级。
 
 ### 认不出产品名时怎么定 kind（`cli_kind` 的两条判据）
