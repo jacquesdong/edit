@@ -124,7 +124,7 @@ import time
 import urllib.parse
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Literal, NamedTuple, TypeAlias, TypedDict
+from typing import Callable, Literal, NamedTuple, NoReturn, TypeAlias, TypedDict
 
 import logging
 
@@ -1118,6 +1118,19 @@ Token: TypeAlias = (OptToken | GotoToken | FileToken | FolderToken
 ArgToken: TypeAlias = GotoToken | FileToken | FolderToken    # arg_token 只产这三种
 
 
+def assert_never(arg: NoReturn) -> NoReturn:
+    """match 的穷尽兜底：走到这儿说明 Token 联合有一种形状没写 case
+
+    不用 `typing.assert_never`：那是 3.11+，本项目下限 3.10（pyproject 的
+    requires-python）。形参标成底类型（mypy 眼里 `NoReturn` == `Never`），好处是**静态**
+    就拦得住：给 Token 加一种形状而忘了补 case，mypy 会在调用处报"类型不是 Never"，
+    不用等运行时炸出来。前提是别用 guard（`case ... if cond`）—— guard 让 mypy 没法把
+    那个形状整个减掉，兜底会误报，判据写进 case 体内即可。
+    """
+
+    raise AssertionError('未处理的 token: %r' % (arg,))
+
+
 # 认识的参数：flag -> (field, arity)
 # flag:  命令行选项
 # field: 报文字段
@@ -1342,7 +1355,7 @@ def has_wait(tokens: list[Token]) -> bool:
                 pass
 
             case _:
-                raise AssertionError('未处理的 token: %r' % (t,))
+                assert_never(t)
     return False
 
 # CLI 等 marker 的轮询间隔（server-cli.js 就是 1 秒一问）
@@ -1503,15 +1516,16 @@ def has_open_target(tokens: list[Token]) -> bool:
                 return True
             case ('goto', _, _, _):
                 return True
-            case ('opt', _, _, values) if values:   # 带取值的选项（-m 的 path1..result）
-                return True
-            # 有意不算：链接走 openExternal 自己那条路；选项空着等于光开关
-            case ('opt', _, _, []):
-                pass
+            case ('opt', _, _, values):
+                # 带取值的选项（-m 的 path1..result）算目标，空着等于光开关、不算。
+                # 判据写在 case 体内而不是 guard：guard 会让 mypy 减不掉 OptToken，
+                # 下面那句 assert_never 就误报
+                if values:
+                    return True
             case ('external', _):
-                pass
+                pass                            # 链接走 openExternal 自己那条路
             case _:
-                raise AssertionError('未处理的 token: %r' % (t,))
+                assert_never(t)
 
     return False
 
@@ -1544,17 +1558,17 @@ def action_but_no_target(tokens):
 
     for t in tokens:
         match t:
-            case ('opt', flag, field, _) if field in NEEDS_TARGET:
-                flags.append(flag)
-            # 其余一律有意忽略：非 NEEDS_TARGET 选项、文件、目录、链接、认不出的
-            case ('opt', _, _, _):
-                pass
+            case ('opt', flag, field, _):
+                # 判据写在 case 体内而不是 guard：guard 会让 mypy 减不掉 OptToken，
+                # 兜底的 assert_never 就误报（has_open_target 同理）
+                if field in NEEDS_TARGET:
+                    flags.append(flag)
             case ('file' | 'folder' | 'external' | 'other', _):
                 pass
             case ('goto', _, _, _):
                 pass
             case _:
-                raise AssertionError('未处理的 token: %r' % (t,))
+                assert_never(t)
 
     if flags and not has_open_target(tokens):
         return True, flags
@@ -1594,7 +1608,7 @@ def wait_but_no_file(tokens):
             case ('folder' | 'external' | 'other', _):
                 pass
             case _:
-                raise AssertionError('未处理的 token: %r' % (t,))
+                assert_never(t)
 
     return (True, wait_flag) if (wait_flag and not has_file) else (False, None)
 
@@ -1790,7 +1804,7 @@ def to_msg(tokens: list[Token], marker: str | None = None) -> OpenMsg | None:
                     msg['fileURIs'].append(file_uri(v))
 
             case _:
-                raise AssertionError(t)     # Token 是穷尽的：漏一种形状就在这儿炸出来
+                assert_never(t)             # Token 是穷尽的：漏一种形状 mypy 当场就报
 
     if marker and not msg['fileURIs']:
         return None                         # CLI 要求 --wait 至少带一个文件
@@ -1996,8 +2010,14 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
                 out.append(flag)
                 out.extend(values)
 
+            case ('external', _):
+                # 链接不该到这儿：main 早把它摘走单独发 openExternal。真到了说明调用方
+                # 漏摘 —— 照样炸出来，别静默把参数丢了。写开这一条是为了让下面的
+                # assert_never 类型闭合（Token 有 6 种形状，这里 6 种都得露面）
+                raise AssertionError('链接不该进 to_argv: %r' % (t,))
+
             case _:
-                raise AssertionError(t)     # Token 是穷尽的：漏一种形状就在这儿炸出来
+                assert_never(t)             # 漏一种形状 mypy 当场就报，不用等运行时炸
 
     if emit['abspath']:
         out = [os.path.abspath(a) if os.path.exists(a) else a for a in out]
