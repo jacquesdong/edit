@@ -2902,8 +2902,19 @@ def main():
             sys.exit('edit --self-test 不接受文件参数')
 
         import doctest            # 只在自检分支 import，不给正常路径加依赖
+        import importlib.util
 
-        result = doctest.testmod()
+        # 以 'edit' 这个名字再 import 一份来测：--self-test 是当脚本跑的
+        # （__name__ == '__main__'），异常类会印成 __main__.NormalizeError，而文档里写的
+        # 是 edit.NormalizeError —— doctest 逐字比模块名，凡断言异常信息的那几条就全红。
+        # test_edit.py 用的也是这套 importlib 手法。
+        spec = importlib.util.spec_from_file_location('edit', os.path.abspath(__file__))
+        assert spec is not None and spec.loader is not None    # 本地文件，必然能拿到
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        result = doctest.testmod(module)
         print('edit --self-test: %d passed, %d failed' %
               (result.attempted, result.failed))
 
