@@ -2267,8 +2267,8 @@ class ColorTest(ProcCase):
     def test_formats_use_levelmark(self):
         """两个格式串都用 %(levelmark)s：不上色也挂着 filter，格式化才不会缺字段"""
 
-        self.assertIn('%(levelmark)s', edit.LOG_FORMAT)
-        self.assertIn('%(levelmark)s', edit.LOG_FORMAT_COLOR)
+        self.assertIn('%(levelMark)s', edit.LOG_FORMAT)
+        self.assertIn('%(levelMark)s', edit.LOG_FORMAT_COLOR)
 
         rec = logging.LogRecord('c', logging.WARNING, 'f', 1, 'boom', None, None)
 

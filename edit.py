@@ -22,6 +22,10 @@
                                只删 $XDG_RUNTIME_DIR / $TMPDIR / hook 所在目录里的，
                                挨个打印它的创建时间和路径；--dry-run 只看不删）
   edit --usage                 打印这份用法说明（--help 是透传给 IDE CLI 的）
+  特殊用法：EDIT_DEBUG=realpath 时，--debug 日志里 [文件:行 #函数] 的"文件"部分显示为
+  绝对真实路径（解析符号链接），默认只显示文件名（如 edit.py:123）。EDIT_DEBUG 同时还是
+  debug 的开关（空 / 0 / false / off / no / n / never 都算关），realpath 之外的任何值
+  都回落到文件名。
   edit --debug                 把吞掉的失败原因（socket 连不上 / 超时 / 被拒…）
                                打到 stderr；EDIT_DEBUG=1 等价，空 / 0 / false / f /
                                off / no / n / never 都算关（EDIT_FZF 同一套）
@@ -135,11 +139,12 @@ logger = logging.getLogger(__name__)
 
 # 日志格式：LOG_FORMAT_DEBUG 就是常规格式再挂一段 [文件:行号 函数] —— 排查那几条被
 # 吞掉的失败时，最需要知道的正是"谁吞的"（file:line 也正好是终端里能点的形状）
-LOG_FORMAT = '%(asctime)s.%(msecs)03d %(levelmark)s %(message)s'
-LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filename)s:%(lineno)d %(funcName)s]'
+TIME_FORMAT = '%(asctime)s.%(msecs)03d'
+LOG_FORMAT = '{t} %(levelMark)s %(message)s'.format(t=TIME_FORMAT)
+LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filePath)s:%(lineno)d #%(funcName)s]'
 
 # 着色版（--color 生效时才用）：时间戳与位置压暗、级别按"越严重越亮"上色、正文不着色。
-# levelmark 由下面的 LevelMark 注入（连尖括号一起上色），所以两个版本都写 %(levelmark)s。
+# levelMark 由下面的 LevelMark 注入（连尖括号一起上色），所以两个版本都写 %(levelMark)s。
 #
 # 配色移植自 fixcomm-py c3ebf44（那边对齐 logback 的 LOG_CONSOLE_PATTERN），几条判据：
 # - 时间戳/位置用 256 色灰 38;5;244：不用 faint（SGR 2）—— 它的实际灰度由终端主题决定，
@@ -147,30 +152,35 @@ LOG_FORMAT_DEBUG = LOG_FORMAT + ' [%(filename)s:%(lineno)d %(funcName)s]'
 # - 级别阶梯 D 38;5;24 → I 38;5;65 → W 33 → E 31：不用 2;34 / 2;32，因为不少主题会
 #   忽略 dim，退化成饱和 ANSI 色反而更亮；做成阶梯后级别一眼可分，正文仍是最亮的一档
 # - 窗口表里当前窗口那颗 * 用亮黄：一行里唯一要跳出来的东西
+# - funcName 用暗青 DIM_CYAN：与位置(GRAY)区分；logback 那边一行只有 logger.method 一处青，
+#   edit 这里仅 debug 段有 funcName，沿用 client.py 同款色相。logger 名 %(name)s 不显示——
+#   edit 是单模块脚本，logger 恒为 __main__/edit，染色纯噪音（同 client.py 移植时即有意省略）
 GRAY      = '\x1b[38;5;244m'
 DIM_BLUE  = '\x1b[38;5;24m'
 DIM_GREEN = '\x1b[38;5;65m'
 YELLOW    = '\x1b[33m'
 RED       = '\x1b[31m'
+DIM_CYAN  = '\x1b[2;36m'   # funcName 用暗青，与位置(GRAY)区分、与 client.py 一致
 RESET     = '\x1b[0m'
 
-LOG_FORMAT_COLOR = (GRAY + '%(asctime)s.%(msecs)03d' + RESET +
-                    ' %(levelmark)s %(message)s')
-LOG_FORMAT_COLOR_DEBUG = (LOG_FORMAT_COLOR + ' ' + GRAY +
-                          '[%(filename)s:%(lineno)d %(funcName)s]' + RESET)
+LOG_FORMAT_COLOR = '{g}{t}{r} %(levelMark)s %(message)s'.format(t=TIME_FORMAT, g=GRAY, r=RESET)
+LOG_FORMAT_COLOR_DEBUG = (
+    LOG_FORMAT_COLOR
+    + ' {g}[%(filePath)s:%(lineno)d {c}#%(funcName)s{r}{g}]{r}'.format(g=GRAY, c=DIM_CYAN, r=RESET)
+)
 
 
 class LevelMark(logging.Filter):
     """不做过滤，只往记录里注入 levelmark（形如 <D>），要上色时连尖括号一起上色
 
     尖括号在这里产出而不是写在格式串里，整块 <D> 才能一起上色、不留一对亮括号。
-    不上色时也挂着它（color=False），于是两个格式串都用 %(levelmark)s，不必再分
+    不上色时也挂着它（color=False），于是两个格式串都用 %(levelMark)s，不必再分
     "有没有装这个 filter" —— 少一处能漏的分支。
 
     >>> r = logging.LogRecord('c', logging.WARNING, 'f', 1, 'm', None, None)
-    >>> LevelMark(False).filter(r) and r.levelmark
+    >>> LevelMark(False).filter(r) and r.levelMark
     '<W>'
-    >>> LevelMark(True).filter(r) and r.levelmark
+    >>> LevelMark(True).filter(r) and r.levelMark
     '\\x1b[33m<W>\\x1b[0m'
     >>> LevelMark(True).filter(r)          # 不过滤：返回 True，记录照常往下走
     True
@@ -197,7 +207,44 @@ class LevelMark(logging.Filter):
             if code:
                 mark = code + mark + RESET
 
-        record.levelmark = mark
+        record.levelMark = mark
+
+        return True
+
+
+class FilePath(logging.Filter):
+    """不做过滤，只往记录里注入 filePath（debug 段 [文件:行 #函数] 里的"文件"部分）
+
+    默认（choice 不是 'realpath'）用 record.filename —— 只显示文件名（如 edit.py），
+    和原来的 %(filename)s 一致；choice='realpath' 时用 os.path.realpath(record.pathname)，
+    显示绝对真实路径（解析符号链接）。choice 直接吃 EDIT_DEBUG 的原始值：所以
+    EDIT_DEBUG=realpath 会同时打开 debug 并走真实路径，EDIT_DEBUG=1 / 空 / off 等
+    都回落到文件名（realpath 之外的任何值都算文件名）。
+
+    >>> r = logging.LogRecord('c', logging.DEBUG, '/a/b/edit.py', 5, 'm', None, None)
+    >>> FilePath('realpath').filter(r) and r.filePath
+    '/a/b/edit.py'
+    >>> FilePath('').filter(r) and r.filePath
+    'edit.py'
+    >>> FilePath('1').filter(r) and r.filePath      # 误写也回落到文件名
+    'edit.py'
+    """
+    def __init__(self, choice: str = '') -> None:
+        super().__init__()
+
+        self.resolve: Callable[[str], str] | None
+
+        match choice:
+            case 'realpath':
+                self.resolve = os.path.realpath
+            case _:
+                self.resolve = None
+
+    def filter(self, record):
+        if self.resolve is not None:
+            record.filePath = self.resolve(record.pathname)
+        else:
+            record.filePath = record.filename
 
         return True
 
@@ -2644,6 +2691,38 @@ def build_args():
     return flags, args
 
 
+def setup_logging(debug: bool, color: str) -> tuple[bool, bool]:
+    # 上色按"这条流"各判一次：窗口表走 stdout，提示与日志走 stderr（--list > f 时
+    # stdout 不是终端，但 stderr 可能还是 —— 各看各的）
+    color_out = should_color(color, sys.stdout)
+    color_err = should_color(color, sys.stderr)
+
+    # 默认 WARNING 而不是 INFO：埋点全是 debug，用户可见的失败走 sys.exit / 手写
+    # stderr，所以这里再高一点，等于把"默认静默"变成结构保证 —— 以后谁加了
+    # logger.info(...) 也不会漏到用户面前（--debug 才看得见）
+    #
+    # handler 自己 new 一个（basicConfig 默认那个也是 stderr）：LevelMark 得挂上去，
+    # 格式串里的 %(levelMark)s 才有着落；不上色时也挂（color=False），只注入 <D>
+    stream = logging.StreamHandler()
+    stream.addFilter(LevelMark(color_err))
+    stream.addFilter(FilePath(os.environ.get(EDIT_DEBUG, '')))
+    stream.setFormatter(logging.Formatter(
+        (LOG_FORMAT_COLOR_DEBUG if color_err else LOG_FORMAT_DEBUG)
+        if debug else
+        (LOG_FORMAT_COLOR if color_err else LOG_FORMAT),
+        datefmt="%Y-%m-%d %H:%M:%S"))
+
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.WARNING,
+        handlers=[stream],
+        force=True,
+    )
+
+    # 返回两个流的上色决策：stdout 给窗口表（print_sockets），stderr 给日志与
+    # 交互提示（ask_socket）。main 里 unpack 后分别喂给对应出口。
+    return color_out, color_err
+
+
 def main():
     flags, args = build_args()
     if flags.usage:
@@ -2652,30 +2731,7 @@ def main():
         print_usage()
         return
 
-    # 上色按"这条流"各判一次：窗口表走 stdout，提示与日志走 stderr（--list > f 时
-    # stdout 不是终端，但 stderr 可能还是 —— 各看各的）
-    color_out = should_color(flags.color, sys.stdout)
-    color_err = should_color(flags.color, sys.stderr)
-
-    # 默认 WARNING 而不是 INFO：埋点全是 debug，用户可见的失败走 sys.exit / 手写
-    # stderr，所以这里再高一点，等于把"默认静默"变成结构保证 —— 以后谁加了
-    # logger.info(...) 也不会漏到用户面前（--debug 才看得见）
-    #
-    # handler 自己 new 一个（basicConfig 默认那个也是 stderr）：LevelMark 得挂上去，
-    # 格式串里的 %(levelmark)s 才有着落；不上色时也挂（color=False），只注入 <D>
-    stream = logging.StreamHandler()
-    stream.addFilter(LevelMark(color_err))
-    stream.setFormatter(logging.Formatter(
-        (LOG_FORMAT_COLOR_DEBUG if color_err else LOG_FORMAT_DEBUG)
-        if flags.debug else
-        (LOG_FORMAT_COLOR if color_err else LOG_FORMAT),
-        datefmt="%Y-%m-%d %H:%M:%S"))
-
-    logging.basicConfig(
-        level=logging.DEBUG if flags.debug else logging.WARNING,
-        handlers=[stream],
-        force=True,
-    )
+    color_out, color_err = setup_logging(flags.debug, flags.color)
 
     # --prune 和打开文件无关，放在最早：它不碰 tokens，也不该被后面那些检查影响
     if flags.prune:
