@@ -1142,7 +1142,7 @@ OPTIONS: dict[str, tuple[OptionField, int]] = {
 # normalize 直接抛 NormalizeError（main 捕获后报错退出）—— diff / merge 数量不齐交回 CLI
 # 也开不对，不如早期明确报错。代价是放弃自由顺序（如 `a b -d`）：那是 edit 比 VS Code 多给的
 # 便利，现在按 VS Code 的写法收紧。-a 的文件仍是位置参数（arity 0），保持自由顺序。
-NEEDS_TARGET: tuple[OptionField, ...] = ('addMode', 'diffMode', 'wait')
+NEEDS_TARGET: tuple[OptionField, ...] = ('addMode', 'wait')
 
 
 def arg_token(a: str) -> ArgToken:
@@ -1240,6 +1240,12 @@ def normalize(args: list[str]) -> list[Token]:
     Traceback (most recent call last):
         ...
     edit.NormalizeError: -m 需要4 个路径...
+    >>> normalize(['-a', '/tmp'])       # -a 是开关（arity 0）：后面几个都算目标，数量不限
+    [('opt', '-a', 'addMode', []), ('folder', '/tmp')]
+    >>> normalize(['-a', '/tmp', 'a.txt'])   # 目录与文件一起收：各落各的 URI（与上游同）
+    [('opt', '-a', 'addMode', []), ('folder', '/tmp'), ('file', 'a.txt')]
+    >>> normalize(['-a'])               # 空着不算 normalize 的错：main 里 NEEDS_TARGET 报
+    [('opt', '-a', 'addMode', [])]
     >>> normalize(['--', 'a.txt:3'])         # -- 之后按字面量
     [('other', '--'), ('other', 'a.txt:3')]
     """
@@ -1444,9 +1450,9 @@ def open_request(args, marker=None):
 
 
 def action_but_no_target(tokens):
-    """NEEDS_TARGET 里的选项（--wait / -a / -d）出现、却没有任何可开的目标（file /
+    """NEEDS_TARGET 里的选项（--wait / -a）出现、却没有任何可开的目标（file /
     folder / goto / other / 带取值的选项）时，返回 (True, 这些选项实际敲的 flag)，否则
-    (False, None)。与 wait_but_no_file / add_but_no_dir 同构：都是"误用检测器"，main 里
+    (False, None)。与 wait_but_no_file 同构：都是"误用检测器"，main 里
     统一用 `misuse, detail = 检测器(tokens); if misuse:` 调。
 
     认不出的 token（('other', …)）算"有东西"，-- 之后的字面量也在其中；-m 那类带取值的
@@ -1510,34 +1516,6 @@ def wait_but_no_file(tokens):
                 has_file = True
 
     return (True, wait_flag) if (wait_flag and not has_file) else (False, None)
-
-
-def add_but_no_dir(tokens):
-    """-a 给的却是文件：-a 把目录加进工作区，文件加不进去。目标里出现 file / goto
-    （且不是 .code-workspace，那种交给 workspace_conflict 报）就算误用；纯 other 交给
-    CLI 自己判，不预裁决。返回 (是否误用, 命中的 flag)：误用为 (True, flag)，没误用为 (False, None)。
-
-    >>> add_but_no_dir(normalize(['-a', 'a.txt']))                 # 文件 -> flag
-    (True, '-a')
-    >>> add_but_no_dir(normalize(['-a', '/tmp']))                  # 目录：OK
-    (False, None)
-    >>> add_but_no_dir(normalize(['-a', 'a.txt', '/tmp']))         # 混了文件
-    (True, '-a')
-    >>> add_but_no_dir(normalize(['-a', 'proj.code-workspace']))   # 工作区交给另一条
-    (False, None)
-    >>> add_but_no_dir(normalize(['--wait', '/tmp']))              # 不是 -a
-    (False, None)
-    """
-
-    add_flag = has_file = False
-    for t in tokens:
-        match t:
-            case ('opt', flag, 'addMode', _):
-                add_flag = flag
-            case ('file' | 'goto', path) if not is_workspace_target(path):
-                has_file = True
-
-    return (True, add_flag) if (add_flag and has_file) else (False, None)
 
 
 # 服务端会把 fileURIs 里"扩展名是 .code-workspace"的那些**改判**成工作区
@@ -2821,16 +2799,16 @@ def main():
         sys.exit('edit: %s 后面没有文件或目录' % ' / '.join(target_flags))
 
     # --wait 等的是"文件编辑器关掉"删 marker：目录没有这一说，marker 没人删
-    # wait_marker 会永久挂住；-a 是把目录加进工作区，文件加不进去。给了错类型目标
-    # 就自己报错（和 NEEDS_TARGET 那套同一个位置、同一个理由：误用一律自己报，
-    # 别交给 CLI 白跑或静默做错）
+    # wait_marker 会永久挂住。给了错类型目标就自己报错（和 NEEDS_TARGET 那套同一个位置、
+    # 同一个理由：误用一律自己报，别交给 CLI 白跑或静默做错）
     misuse, flag = wait_but_no_file(tokens)
     if misuse:
         sys.exit('edit %s: 后面得是文件（--wait 等的是文件编辑器关掉，目录没有这一说）' % flag)
 
-    misuse, flag = add_but_no_dir(tokens)
-    if misuse:
-        sys.exit('edit %s: 后面得是目录（add 把目录加进工作区，文件加不进去）' % flag)
+    # -a 不拦类型：上游 buddycn 的 --add 目录、文件都收（文件原样进 fileURIs，见 fixture
+    # open-add-file），我们也照收 —— 目录进 folderURIs、文件进 fileURIs（to_msg 里那套
+    # 分类）。唯一还拦的是 .code-workspace：那种目标会被服务端改判成"打开工作区"，
+    # -a 加不进任何工作区，交给下面 workspace_conflict 报
 
     # .code-workspace 会被服务端改判成"打开工作区"（server-main.js 的 sU()）：能开，
     # 但打开的不是文件编辑器，于是行号 / --wait / -d / -m / -a 的语义全不成立 ——

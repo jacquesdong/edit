@@ -965,18 +965,37 @@ class NoTargetTest(EditCase):
         self.assertNotIn('Traceback', proc.stderr)
 
     def test_target_type_guards(self):
-        """给了错类型目标也自己报错（不交给 CLI）：--wait 要文件、-a 要目录"""
+        """给了错类型目标也自己报错（不交给 CLI）：--wait 要文件"""
 
-        # 误用：--wait 没有文件（只有目录）、-a 给了文件（混了文件也算）
-        for args, needle in ((['--wait', self.dir], '后面得是文件'),
-                              (['-a', self.a], '后面得是目录'),
-                              (['-a', self.dir, self.a], '后面得是目录')):
+        # 误用：--wait 只有目录（文件编辑器才关得掉，目录没这说法）
+        for args, needle in ((['--wait', self.dir], '后面得是文件'),):
             with self.subTest(args):
                 proc = self.run_edit(*args)
 
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(needle, proc.stderr)
                 self.assertIsNone(self.cli_args(), '不该交给 CLI')
+
+    def test_add_takes_file_or_folder(self):
+        """-a 不拦类型：上游 buddycn 的 --add 目录、文件都收（文件进 fileURIs，见 fixture
+        open-add-file），所以 edit 也不预裁决 —— 照直连 / 回退 CLI 自己判"""
+
+        for args in (['-a', self.a], ['-a', self.dir, self.a], ['--add', self.a]):
+            with self.subTest(args):
+                proc = self.run_edit(*args)
+
+                self.assertEqual(proc.returncode, 7, proc.stderr)   # 没有 socket：交给假 CLI
+                self.assertNotIn('Traceback', proc.stderr)
+                self.assertNotIn('后面得是目录', proc.stderr)
+
+    def test_add_lands_where_upstream_lands(self):
+        """-a 的落位照上游：目录进 folderURIs、文件进 fileURIs（fixture open-add-mixed 同款）"""
+
+        msg = self.open_msg('-a', self.dir, self.a)
+
+        self.assertTrue(msg['addMode'])
+        self.assertEqual(msg['folderURIs'], [edit.file_uri(self.dir)])
+        self.assertEqual(msg['fileURIs'], [edit.file_uri(self.a)])
 
         # 有正确类型就放行：--wait 有文件、-a 有目录（混了别的也放行）
         for args in (['--wait', self.a], ['-a', self.dir], ['--wait', self.a, self.dir]):

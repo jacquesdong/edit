@@ -53,12 +53,17 @@ stderr 有一句、`$?` 却是 0，脚本和 CI 会当成功。`code` 只能解�
 **这条会传染给 edit**：`os.execv` 是整个替换进程，CLI 的退出码就是 edit 的。已出现的例子：
 `edit --wait somedir/` 曾经落进 CLI、由它打印 `At least one file must be provided to wait for.`
 然后 **exit 0** —— 而 `edit -a`（空目标）是 edit 自己 `sys.exit` → 1。同类错误两种退出码。
-**edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）：`-a` / `-d` / `--wait`
-空着就报"没有文件或目录"。进一步，`--wait` 给的不是文件（只有目录、或认不出的字面量）、`-a` 只给了文件
-（不是目录）也拦 —— 前者 `--wait` 的 marker 没人删会永久挂住，后者文件加不进工作区。
+**edit 认定为误用的情况一律自己报错**（`NEEDS_TARGET` 那套的推广）：`-a` / `--wait`
+空着就报"没有文件或目录"。进一步，`--wait` 给的不是文件（只有目录、或认不出的字面量）
+也拦 —— 它的 marker 没人删会永久挂住。
 只在"能确定是误用"时拦：`folder` / `file` / `goto` 类型清楚，照此判；纯 `other`（认不出的
 字面量）交给 CLI 自己判，不预裁决（`--wait` 除外：它必须绑定一个文件，other 也不是文件，
 所以同样拦，见上；`-a` / `-d` 的 other 仍交 CLI，和 `nothing_to_open` 把 `other` 当"有目标"同一理由）。
+`-a` 的**类型**不拦：实测上游 buddycn 的 `--add` 目录、文件都收，且**数量不限**、可以混着给 ——
+目录进 `folderURIs`、文件进 `fileURIs`（`to_msg` 那套分类），见 fixture `open-add-dir`
+（只给目录）、`open-add-file`（只给文件，文件进 `fileURIs`）、`open-add-mixed`（目录 + 两个文件）。
+`.code-workspace` 是唯一的例外：它会被服务端改判成"打开工作区"，`-a` 加不进
+任何工作区，所以由 `workspace_conflict` 拦（那是"目标类型"之外的另一条，见下）。
 
 ### 收发分三层：底层只交付字节，解读留给调用方
 

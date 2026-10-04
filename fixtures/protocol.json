@@ -1,5 +1,29 @@
 {
-  "open-add": {
+  "open-add-dir": {
+    "args": [
+      "-a",
+      "/tmp/proj"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": true,
+      "diffMode": false,
+      "fileURIs": [],
+      "folderURIs": [
+        "file:///tmp/proj"
+      ],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-add-file": {
     "args": [
       "-a",
       "/tmp/a.txt"
@@ -12,6 +36,35 @@
         "file:///tmp/a.txt"
       ],
       "folderURIs": [],
+      "forceNewWindow": false,
+      "forceReuseWindow": false,
+      "gotoLineMode": false,
+      "mergeMode": false,
+      "type": "open"
+    },
+    "source": {
+      "cli": "buddycn",
+      "install": "<home>/.codebuddy-server-cn/bin/stable-757a5b2fd56bc7e1fcabb38b58d2ac1694f78f6d"
+    }
+  },
+  "open-add-mixed": {
+    "args": [
+      "-a",
+      "/tmp/proj",
+      "/tmp/a.txt",
+      "/tmp/b.txt"
+    ],
+    "direct": true,
+    "msg": {
+      "addMode": true,
+      "diffMode": false,
+      "fileURIs": [
+        "file:///tmp/a.txt",
+        "file:///tmp/b.txt"
+      ],
+      "folderURIs": [
+        "file:///tmp/proj"
+      ],
       "forceNewWindow": false,
       "forceReuseWindow": false,
       "gotoLineMode": false,
