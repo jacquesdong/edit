@@ -372,18 +372,20 @@ class MergeTest(EditCase):
                          ['file://' + os.path.join(os.getcwd(), n)
                           for n in ('a', 'b', 'base', 'result')])
 
-    def test_too_few_paths_falls_back(self):
-        """不足 4 个路径：交回 CLI 让它自己报错"""
+    def test_too_few_paths_rejected(self):
+        """不足 4 个路径：normalize 直接抛 NormalizeError（不交回 CLI）"""
 
         for args in (['-m'], ['-m', self.a], ['-m', self.a, self.b],
                      ['-m', self.a, self.b, self.a]):
             with self.subTest(args):
-                self.assertIsNone(edit.open_request(args))
+                with self.assertRaises(edit.NormalizeError):
+                    edit.open_request(args)
 
-    def test_value_is_option_falls_back(self):
-        """4 个取值里混进一个选项：同样交回 CLI"""
+    def test_value_is_option_rejected(self):
+        """4 个取值里混进一个选项：同样抛 NormalizeError"""
 
-        self.assertIsNone(edit.open_request(['-m', self.a, '-r', self.b, self.a]))
+        with self.assertRaises(edit.NormalizeError):
+            edit.open_request(['-m', self.a, '-r', self.b, self.a])
 
     def test_mixes_with_flags(self):
         msg = edit.open_request(['-r', '-m', self.a, self.b, self.a, self.b])
@@ -780,9 +782,9 @@ class FallbackTest(EditCase):
         self.assertIsNone(self.cli_args(), '不该起 node')
 
     def test_untranslatable_args(self):
-        """--wait / 取值不够的 --merge / 无参数 / 没有 socket：一律交给 CLI"""
+        """--wait / 无参数 / 没有 socket：一律交给 CLI（不足 4 路径的 -m 现在直接报错，不在这列）"""
 
-        for args in (['--wait', self.a], ['--merge', self.a], []):
+        for args in (['--wait', self.a], []):
             with self.subTest(args):
                 proc = self.run_edit(*args)
 
@@ -909,13 +911,20 @@ class NoTargetTest(EditCase):
     """-a / -d / --wait 空着（没有目标）→ 直接提示退出，不交给 CLI"""
 
     def test_needs_target_options_error(self):
-        for args in (['-d'], ['--diff'], ['-a'], ['--add'], ['--wait'], ['-w'],
-                     ['-r', '-d']):
+        for args, needle in (
+            (('-d',), '需要2 个文件'),
+            (('--diff',), '需要2 个文件'),
+            (('-a',), '后面没有文件或目录'),
+            (('--add',), '后面没有文件或目录'),
+            (('--wait',), '后面没有文件或目录'),
+            (('-w',), '后面没有文件或目录'),
+            (('-r', '-d'), '需要2 个文件'),
+        ):
             with self.subTest(args):
                 proc = self.run_edit(*args)
 
                 self.assertEqual(proc.returncode, 1, proc.stderr)
-                self.assertIn('没有文件或目录', proc.stderr)
+                self.assertIn(needle, proc.stderr)
                 self.assertIsNone(self.cli_args(), '不该交给 CLI')
 
     def test_has_target_is_fine(self):
@@ -941,7 +950,7 @@ class NoTargetTest(EditCase):
     def test_unknown_token_counts_as_target(self):
         """-- 之后的字面量算"有东西"：交回 CLI 让它去理解，不能报错"""
 
-        proc = self.run_edit('-d', '--', 'a.txt')
+        proc = self.run_edit('--', 'a.txt')
 
         self.assertEqual(proc.returncode, 7, proc.stderr)
         self.assertNotIn('没有文件或目录', proc.stderr)
@@ -952,7 +961,7 @@ class NoTargetTest(EditCase):
         proc = self.run_edit('--interactive', '-d')
 
         self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertIn('-d 后面没有文件或目录', proc.stderr)
+        self.assertIn('-d 需要2 个文件', proc.stderr)
         self.assertNotIn('Traceback', proc.stderr)
 
     def test_target_type_guards(self):
@@ -1528,12 +1537,12 @@ class WaitTest(EditCase):
         before = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*')))
 
         self.win = self.add_window()
-        proc = self.run_edit('--wait', '--merge', self.a, hook=self.win.path)
+        proc = self.run_edit('--wait', '--bogus', self.a, hook=self.win.path)
 
         self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 被调起
-        # --merge 只给了 1 个路径（要 4 个），翻不出来 -> 交回 CLI；
-        # --wait 被摘掉了（假 CLI 不是 VS Code 系，见下），我们造的 marker 已收回
-        self.assertEqual(self.cli_args(), '--merge ' + self.a)
+        # --bogus 不认识（整成 other）-> 翻不出来交回 CLI；--wait 被摘掉（假 CLI 不是
+        # VS Code 系），我们造的 marker 已收回
+        self.assertEqual(self.cli_args(), '--bogus ' + self.a)
 
         left = set(glob.glob(os.path.join(tempfile.gettempdir(), 'edit-wait-*'))) - before
         self.assertEqual(left, set(), 'marker 该被收回去')

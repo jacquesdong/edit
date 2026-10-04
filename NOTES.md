@@ -240,8 +240,8 @@ code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **
   └─ 翻不了（未知选项 / -- / 无参数 / 没有 socket）
         → 交给 remote-cli（code / buddycn / trae-cn，从 PATH 或 EDIT_CLI 找）
 
-先拦一道：-a / -d / --wait 空着（没文件也没目录）→ `edit: -d 后面没有文件或
-目录`，退出 1，不交给 CLI。裸调用与只给 -r / -n 照旧走上面的回退 —— 实测那几个
+先拦一道：-a / --wait 空着（没文件也没目录）、-d / -m 取值不够（normalize 直接抛
+NormalizeError）→ 退出 1，不交给 CLI。裸调用与只给 -r / -n 照旧走上面的回退 —— 实测那几个
 在真 CLI 里都会真的发报文（裸调用 = 开/聚焦窗口，-r = 复用窗口，-n = 新窗口），
 空发但都有定义。
 ```
@@ -310,8 +310,9 @@ args --normalize--> [token] --to_msg---> open 报文（socket 后端）
   `('file', 路径)` / `('folder', 路径)` / `('other', 原文)`；
 - `EMIT`：每个 kind 怎么翻译（goto 写成什么、`--wait` 保不保留、路径转不转绝对、
   跳转选项是不是只能给一次）—— "针对不同程序翻译命令"就这一张表；
-- 认不出来的（不认识的选项、取值不够的、`--` 之后的字面量）一律整成
-  `('other', 原文)`：socket 后端见它就返回 None 交回 CLI，CLI 后端原样吐回去。
+- 认不出来的（不认识的选项、`--` 之后的字面量）一律整成 `('other', 原文)`：socket
+  后端见它就返回 None 交回 CLI，CLI 后端原样吐回去。取值不够的 -d / -m 不走 other，
+  而是 normalize 直接抛 NormalizeError（见下）。
 
 两条约束：
 
@@ -381,8 +382,8 @@ vim 9.1 / nano 7.2 / emacs 29.4 / emacsclient 29.4）：
 emacs 系**没有命令行的 diff 入口**：`emacs --help` 里只有 `--eval EXPR` /
 `--execute EXPR` / `-f FUNC`（没有 `--diff`，也没有 `-e`），`emacsclient` 是
 `-e, --eval`。`-f ediff-files` 也不行 —— 它是交互式函数，会去 minibuffer 提问，不吃
-命令行上的文件名。**所以这块不翻译**：ediff 的两个文件是位置参数（`-d` 的 arity 是 0，
-文件个数与它无关），要重写就得整条命令一起改造，还要处理 Lisp 转义。想 diff 就这么写
+命令行上的文件名。**所以这块不翻译**：ediff 的两个文件是位置参数（`-d` 现在 arity 2，要紧跟 2 个文件，
+文件个数由 arity 卡），要重写就得整条命令一起改造，还要处理 Lisp 转义。想 diff 就这么写
 （两条都实测过，pty 里真的开出了 `*Ediff Control Panel*`）：
 
 ```
@@ -794,8 +795,9 @@ IDE 每次 listen 一个新 UUID 的 socket、旧的既不关也不删文件，�
    `-g` / `--goto` 现在直接忽略（取值按位置参数走，所以照旧直连；
    fixtures 的 `open-goto-short` / `open-goto-flag` 报文仍逐字节对得上）。
    `--merge` / `-m` 也已直连：吃 4 个路径（path1 path2 base result）原样进
-   `fileURIs` 并置 `mergeMode`，不足 4 个、或某个取值又是个选项，交回 CLI
-   （fixtures 的 `open-merge` / `open-merge-short` 已标 `direct:true`）。
+   `fileURIs` 并置 `mergeMode`，不足 4 个或取值夹了选项由 normalize 直接抛
+   `NormalizeError`（不交回 CLI；fixtures 的 `open-merge` / `open-merge-short` 已标
+   `direct:true`）。
    路径是相对时 CLI 也按 cwd 解成绝对（试过 `-m rel1 …` -> `file:///tmp/rel1`）。
    真机验过：`edit -m <4 个路径>` 发给另一个窗口，退出 0（窗口收下，不起 node）。
 2. ~~`--interactive` 选中的窗口**直接开文件**~~ 已支持：`edit --interactive <文件>`

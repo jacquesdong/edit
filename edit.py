@@ -60,7 +60,7 @@
   是选项）。内联写法 --goto=X / -g=X 不特判 —— 上游自己也不认（实测取值会被丢掉或
   塞错字段），所以跟别的"不认识的选项"一样原样交给 CLI。此外以 - 开头的是选项，
   -- 之后按字面量原样交给 CLI；其中 -m / --merge 带 4 个取值（path1 path2 base
-  result），取值不够就交回 CLI 报错。
+  result），不足 4 个由 normalize 抛 NormalizeError 报错。
   真实存在的文件优先（文件名里可以带冒号）；VS Code 系下存在的路径参数会转成
   绝对路径（remote-cli 是代理，相对路径未必按当前 shell 的 cwd 解释），
   vim 系保持相对路径。其余 CLI（ed 等）不认识行号，只传文件。
@@ -1090,7 +1090,7 @@ def socket_status(sock, timeout=1.5):
 #   opt    认得的选项 + 它的取值（开关选项是 []）
 #   goto   文件:行号[:列]（列可能没有）
 #   file / folder   普通路径（是不是目录在 normalize 里就定了）
-#   other  认不出来的：不认识的选项、取值不够的选项、-- 之后的字面量
+#   other  认不出来的：不认识的选项、-- 之后的字面量（取值不够的 -d / -m 由 normalize 抛异常，不进 other）
 #
 # 保留元组形态（而不是 NamedTuple）：repr 紧凑、doctest 与调试输出都不用改；而字段名
 # 由 match 的 value pattern 给（`case ('opt', flag, field, values)`），够用了。
@@ -1127,7 +1127,7 @@ OPTIONS: dict[str, tuple[OptionField, int]] = {
     '-r': ('forceReuseWindow', 0), '--reuse-window': ('forceReuseWindow', 0),
     '-n': ('forceNewWindow', 0), '--new-window': ('forceNewWindow', 0),
     '-a': ('addMode', 0), '--add': ('addMode', 0),
-    '-d': ('diffMode', 0), '--diff': ('diffMode', 0),
+    '-d': ('diffMode', 2), '--diff': ('diffMode', 2),
     '-m': ('mergeMode', 4), '--merge': ('mergeMode', 4),
     '--wait': ('wait', 0), '-w': ('wait', 0),
 }
@@ -1137,10 +1137,11 @@ OPTIONS: dict[str, tuple[OptionField, int]] = {
 # 所以 main 里直接提示退出。裸调用与 -r / -n 不在此列 —— 那些对 code 系有定义
 # （开窗口 / 复用窗口 / 新窗口）
 #
-# 别把它改成 OPTIONS 的 arity：arity 是"这个选项自己吃几个取值"，而 -d / -a 的文件
-# 是位置参数 —— CLI 自己的声明里 diff 就是 type:"boolean"，args:["file","file"] 只是
-# help 占位符（实测 `a b -d`、`-d a -r b` 它都认）。写成 arity 2 会把这两类打回 CLI，
-# 而且"取值不够"的既定行为是交回 CLI、不是报错，报错还得在这儿单独判
+# -d / --diff 现在就是 arity 2（紧跟 2 个文件）、-m / --merge 是 arity 4，跟 VS Code 的
+# `--diff <f1> <f2>` / `--merge <p1> <p2> <base> <result>` 对齐。取值不足或夹了选项，
+# normalize 直接抛 NormalizeError（main 捕获后报错退出）—— diff / merge 数量不齐交回 CLI
+# 也开不对，不如早期明确报错。代价是放弃自由顺序（如 `a b -d`）：那是 edit 比 VS Code 多给的
+# 便利，现在按 VS Code 的写法收紧。-a 的文件仍是位置参数（arity 0），保持自由顺序。
 NEEDS_TARGET: tuple[OptionField, ...] = ('addMode', 'diffMode', 'wait')
 
 
@@ -1166,6 +1167,13 @@ def arg_token(a: str) -> ArgToken:
         return ('folder', a)
 
     return ('file', a)
+
+
+class NormalizeError(ValueError):
+    """normalize 期间的参数错误（-d 要 2 个文件 / -m 要 4 个路径，或取值夹了选项）
+
+    main 捕获后打印并退出——数量不齐时交回 CLI 也开不对，不如早期明确报错。
+    """
 
 
 def normalize(args: list[str]) -> list[Token]:
@@ -1200,8 +1208,38 @@ def normalize(args: list[str]) -> list[Token]:
     [('opt', '-r', 'forceReuseWindow', []), ('goto', 'a.txt', '3', None)]
     >>> normalize(['--goto=-r'])             # 内联写法当不认识的选项
     [('other', '--goto=-r')]
-    >>> normalize(['-m', 'a', '-r', 'b'])    # 取值不够 / 取值又是个选项
-    [('other', '-m'), ('file', 'a'), ('opt', '-r', 'forceReuseWindow', []), ('file', 'b')]
+    >>> normalize(['-d', 'a.txt', 'b.txt'])                 # -d 紧跟 2 个文件（arity 2）
+    [('opt', '-d', 'diffMode', ['a.txt', 'b.txt'])]
+    >>> normalize(['--diff', 'a.txt', 'b.txt'])             # 长名同
+    [('opt', '--diff', 'diffMode', ['a.txt', 'b.txt'])]
+    >>> normalize(['a.txt', 'b.txt', '-d'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -d 需要2 个文件...
+    >>> normalize(['-d'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -d 需要2 个文件...
+    >>> normalize(['-d', 'a.txt'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -d 需要2 个文件...
+    >>> normalize(['-d', '-r'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -d 需要2 个文件...
+    >>> normalize(['-m', 'base', 'theirs', 'ours', 'result']) # 4 个路径收进 values
+    [('opt', '-m', 'mergeMode', ['base', 'theirs', 'ours', 'result'])]
+    >>> normalize(['--merge', 'base', 'theirs', 'ours', 'result'])  # 长名同
+    [('opt', '--merge', 'mergeMode', ['base', 'theirs', 'ours', 'result'])]
+    >>> normalize(['-m', 'a', 'b'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -m 需要4 个路径...
+    >>> normalize(['-m', 'a', '-r', 'b'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -m 需要4 个路径...
     >>> normalize(['--', 'a.txt:3'])         # -- 之后按字面量
     [('other', '--'), ('other', 'a.txt:3')]
     """
@@ -1237,8 +1275,15 @@ def normalize(args: list[str]) -> list[Token]:
             values = args[i:i + arity]
 
             if len(values) < arity or any(v.startswith('-') for v in values):
-                out.append(('other', a))     # 取值不够 / 取值又是个选项
-                continue
+                if field == 'diffMode':
+                    want = '2 个文件'
+                elif field == 'mergeMode':
+                    want = '4 个路径（base / theirs / ours / result）'
+                else:
+                    want = '%d 个取值' % arity
+                got = ('取值里夹了选项' if any(v.startswith('-') for v in values)
+                       else '只收到 %d 个' % len(values))
+                raise NormalizeError('%s 需要%s，%s' % (a, want, got))
 
             i += arity
             out.append(('opt', a, field, values))
@@ -1322,7 +1367,8 @@ def wait_marker(path, interval=WAIT_MARKER_INTERVAL):
 def open_request(args, marker=None):
     """把命令行参数翻译成 socket 直连要发的 open 报文；翻不了返回 None
 
-    翻不了就交回 CLI：未知选项 / -- / 取值不够 / 没给参数。
+    翻不了就交回 CLI：未知选项 / -- / 没给参数。-d 要 2 个文件、-m 要 4 个路径，
+    数量不够或取值夹了选项由 normalize 直接抛 NormalizeError（不交回 CLI）。
     目录进 folderURIs，文件进 fileURIs，:行号[:列] 交给 parse_goto 认。
 
     （-a / -d / --wait 空着的情况走不到这里：main 见到 NEEDS_TARGET 里那几项没有
@@ -1333,7 +1379,8 @@ def open_request(args, marker=None):
     不认识的选项一样整成 ('other', 原文)，于是这里返回 None（交回 CLI）。
 
     -m / --merge 认 4 个取值（path1 path2 base result）：原样进 fileURIs 并置
-    mergeMode。少一个、或某个取值又是个选项，都交回 CLI。
+    mergeMode。不足 4 个由 normalize 抛 NormalizeError（不交回 CLI，merge 编辑器也救不了
+    不齐的路径）；取值里夹了别的选项同理报错。
 
     --wait / -w 要带 marker（make_marker() 造的那个空文件路径）：带上就直连等
     窗口删它，没带就交回 CLI——CLI 自己会造一个。和 CLI 一样，--wait 必须至少
@@ -1377,10 +1424,14 @@ def open_request(args, marker=None):
     ['file:///a', 'file:///b', 'file:///base', 'file:///result']
     >>> open_request(['-r', '-m', '/a', '/b', '/base', '/result'])['forceReuseWindow']
     True
-    >>> open_request(['-m', '/a', '/b', '/base']) is None        # 少一个
-    True
-    >>> open_request(['-m', '/a', '-r', '/base', '/result']) is None  # 取值又是个选项
-    True
+    >>> open_request(['-m', '/a', '/b', '/base'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -m 需要4 个路径...
+    >>> open_request(['-m', '/a', '-r', '/base', '/result'])  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+        ...
+    edit.NormalizeError: -m 需要4 个路径...
     >>> open_request(['-g']) is None                        # 选项被忽略，没东西可开
     True
     >>> open_request(['-g', '-r']) is None                  # 只剩 -r：还是没东西可开
@@ -1403,11 +1454,11 @@ def action_but_no_target(tokens):
 
     >>> action_but_no_target(normalize(['--wait']))              # NEEDS_TARGET 无目标
     (True, ['--wait'])
-    >>> action_but_no_target(normalize(['-a', '-d']))             # 多个
-    (True, ['-a', '-d'])
+    >>> action_but_no_target(normalize(['-a']))                  # -a 同：光开关没目录
+    (True, ['-a'])
     >>> action_but_no_target(normalize(['--wait', 'a.txt']))      # 有文件：OK
     (False, None)
-    >>> action_but_no_target(normalize(['-d', '/tmp']))           # 有目录：OK
+    >>> action_but_no_target(normalize(['-d', '/tmp', '/tmp2']))  # diff 要 2 个，给 2 个目录：OK
     (False, None)
     >>> action_but_no_target(normalize(['-m', 'a', 'b', 'base', 'res']))  # 取值算目标
     (False, None)
@@ -1756,7 +1807,7 @@ class EmitRow(TypedDict):
 #   那 6 个开关（键就是 token 的 field 名：wait / forceReuseWindow /
 #   forceNewWindow / addMode / diffMode / mergeMode）
 #          : 这类 CLI 认不认这个 VS Code 系开关。认就原样递过去，不认就摘掉
-#            （mergeMode 例外：摘开关、留它的取值）。**一项对一个选项，不共用** ——
+#            （diffMode / mergeMode 例外：摘开关时也留取值）。**一项对一个选项，不共用** ——
 #            这几个短选项在别的 CLI 里各有别解，每项的注释就是实测记录。
 #            键名与 token 的 field 同名是刻意的：to_argv 里 emit[field] 直接查表
 #   abspath: 存在的路径转不转绝对（remote-cli 是代理，相对路径未必按 cwd 解释）
@@ -1875,8 +1926,7 @@ def to_argv(tokens: list[Token], kind: str | None) -> list[str]:
                 # （逐项见 EMIT 里那几行注释）：不认就摘掉。EMIT 的键与 field 同名，
                 # 所以这里直接查表 —— 加一个开关只需要往 EMIT 那几行里加一项。
                 if not emit[field]:
-                    if field == 'mergeMode':
-                        out.extend(values)  # 合并没有等价物：丢开关，四个路径照开
+                    out.extend(values)   # 不认这个开关就摘掉，但取值（diff/merge 的文件、路径）照常当参数传
                     continue
 
                 out.append(flag)
@@ -2757,7 +2807,10 @@ def main():
             sys.exit('edit --open: 不像链接（要带 ://）：%s' % ' '.join(bad))
 
     # 命令行只扫一次：socket 后端吃 to_msg，CLI 后端吃 to_argv（纯函数，先扫出来）
-    tokens = normalize(args)
+    try:
+        tokens = normalize(args)
+    except NormalizeError as e:
+        sys.exit('edit: %s' % e)
 
     # -a / -d / --wait 要"有东西可开"才有意义（要目录 / 要两个文件 / 至少要一个文件）：
     # 空着交给 CLI 只会发个空报文，或让 vim 系开个空编辑器。裸调用与 -r / -n 不拦 ——
@@ -2857,7 +2910,7 @@ def main():
         return 1 if result.failed else 0
 
     # server 端直接和窗口 socket 说话：不用找 CLI，也不用起 node。
-    # 翻不了（认不出 / 取值不够）或发失败，就交给下面的 CLI 路径
+    # 翻不了（认不出 / 没给参数）或发失败，就交给下面的 CLI 路径
     sock = current_socket()
     why_cli = None                      # 交回 CLI 的原因（只在 remote-cli 那条路上要用）
 
