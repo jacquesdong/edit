@@ -686,6 +686,28 @@ class CliKindTest(EditCase):
                                      'PATH': path}, clear=True):
             self.assertEqual(edit.find_remote_cli(), [good])
 
+    def test_is_self_cli(self):
+        """edit 解析后等于自身：is_self_cli 认得出；别的 CLI 认不出"""
+
+        self.assertTrue(edit.is_self_cli(edit.EDIT_SELF))
+        self.assertTrue(edit.is_self_cli(EDIT))            # 脚本/软链本身
+        self.assertFalse(edit.is_self_cli('/usr/bin/vim'))
+
+    def test_find_env_cli_skips_self(self):
+        """$VISUAL=edit（自身）时跳过，落到 $EDITOR"""
+
+        with patch.dict(os.environ, {'VISUAL': EDIT, 'EDITOR': self.fake_cli}):
+            self.assertEqual(edit.find_env_cli(), [self.fake_cli])
+
+    def test_find_env_cli_self_only_returns_none(self):
+        """只有 $VISUAL=edit、没有 $EDITOR：自引用被跳过，返回 None
+
+        交给 find_cli 的兜底，而不是把自身当编辑器无限递归。
+        """
+
+        with patch.dict(os.environ, {'VISUAL': EDIT}, clear=True):
+            self.assertIsNone(edit.find_env_cli())
+
 
 class DryRunTest(EditCase):
     """--dry-run：能直连时打 JSON，翻不了时打命令行"""
@@ -791,6 +813,37 @@ class FallbackTest(EditCase):
 
                 self.assertEqual(proc.returncode, 7, proc.stderr)
                 self.assertNotIn('改用', proc.stderr)   # 没失败过，不用解释
+
+
+    def test_visual_self_falls_back_to_editor(self):
+        """回归：$VISUAL=edit 指向自身时不能无限自递归
+
+        清掉 PATH 和 EDIT_CLI，让 find_cli 只能走到 $EDITOR：VISUAL 是自引用、
+        被跳过，最终落到 $EDITOR（假 CLI）。修复前的 bug 会让 edit 把自己 exec
+        出去无限循环，subprocess 会超时失败（而不是干净退出 7）。
+        """
+
+        proc = self.run_edit(
+            self.a,
+            extra_env={'VISUAL': EDIT, 'EDITOR': self.fake_cli,
+                       'EDIT_CLI': '', 'PATH': ''},
+        )
+
+        self.assertEqual(proc.returncode, 7, proc.stderr)   # 假 CLI 退 7 = 没卡死
+        self.assertEqual(self.cli_args(), self.a)            # 真落到 $EDITOR 上
+
+    def test_visual_and_editor_both_self_exits(self):
+        """$VISUAL 和 $EDITOR 都指向自身：两条都跳过，找不到 cli 就退出（不递归）"""
+
+        proc = self.run_edit(
+            self.a,
+            extra_env={'VISUAL': EDIT, 'EDITOR': EDIT,
+                       'EDIT_CLI': '', 'PATH': ''},
+        )
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)   # 找不到 cli 报错退出
+        self.assertIn('找不到 cli', proc.stderr)
+        self.assertIsNone(self.cli_args(), '不该回退到任何 CLI')
 
 
 class ReplyTest(EditCase):

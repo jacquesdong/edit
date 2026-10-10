@@ -304,6 +304,9 @@ def paint(text, code, colored):
 
     return code + text + RESET
 
+# edit 自身的真实可执行路径
+EDIT_SELF = os.path.realpath(__file__)
+
 # 显式点名用哪个 CLI 打开文件（命令名或路径，可带参数），挑 CLI 时优先级最高；
 EDIT_CLI = 'EDIT_CLI'
 
@@ -413,6 +416,14 @@ def redirect_socket(sock):
     os.environ[IPC_HOOK] = sock
 
 
+def is_self_cli(cli):
+    """cli 解析后是否就是 edit 自己（典型：$VISUAL=edit 指向本脚本）
+
+    认出来就别把它当外部编辑器 exec 出去，否则会无限自递归（见 find_cli 的兜底）。
+    """
+    return os.path.realpath(cli) == EDIT_SELF
+
+
 def choose_cli_exe(remote_cli_dir):
     """在 <安装目录>/bin/remote-cli 里挑一个 CLI
 
@@ -520,8 +531,19 @@ def find_env_cli():
             continue
 
         cli = split_cmd(v)
-        if cli:
-            return cli
+        if not cli:
+            logger.debug('$%s 解析不到，跳过', i)
+            continue
+
+        try:
+            if is_self_cli(cli[0]):
+                logger.debug('$%s=%s 解析到 edit 自身，跳过', i, v)
+                continue
+        except OSError as e:
+            logger.debug('$%s=%s, %r', i, v, e)
+            continue
+
+        return cli
 
 def find_fallback_cli():
     for i in VIM_LIKE:
@@ -578,9 +600,19 @@ def find_cli():
 
     for choice in finders:
         cli = choice()
-        if cli:
-            logger.debug('cli from %s: %s', choice.__name__, cli[0])
-            return cli
+        if not cli:
+            continue
+
+        try:
+            if is_self_cli(cli[0]):
+                logger.debug('cli from %s: %s 是自引用，跳过', choice.__name__, cli)
+                continue
+        except OSError as e:
+            logger.debug('cli from %s: %s, %r', choice.__name__, cli, e)
+            continue
+
+        logger.debug('cli from %s: %s', choice.__name__, cli)
+        return cli
 
 def split_cmd(v):
     """'vim -u NONE' -> ['/usr/bin/vim', '-u', 'NONE']；解析不到返回 None
