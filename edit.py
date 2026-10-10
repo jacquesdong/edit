@@ -2722,12 +2722,8 @@ def open_external_msg(uris: list[str]) -> OpenExternalMsg:
     return {'type': 'openExternal', 'uris': list(uris)}
 
 
-# BROWSER 写的是自己时就跳过：BROWSER='edit' 又正好没有窗口可直连时，
-# 一路 exec 回自己会一圈接一圈停不下来（链接 edit 自己就认，所以这个自指真会绕）
-EDIT_NAMES = ('edit', 'edit.py')
 # IDE 自家的 browser.sh（macOS / Linux remote 的 helper 都叫这个）内部还是调
 # server-cli.js -> 同一个 socket，等于把直连失败换个进程再犯一遍，没有任何收益；
-# 认出就跳过，和 EDIT_NAMES 同一类问题（"别回退给自己人"）
 BROWSER_NAMES = ('browser.sh',)
 
 
@@ -2753,9 +2749,10 @@ def find_browser() -> list[str] | None:
     if v:
         cmd = split_cmd(v)
 
-        base = os.path.basename(cmd[0]) if cmd else ''
-        if cmd and base not in EDIT_NAMES and base not in BROWSER_NAMES:
-            return cmd
+        if cmd and not is_self_cli(cmd[0]):
+            base = os.path.basename(cmd[0])
+            if base not in BROWSER_NAMES:
+                return cmd
 
     for name in OPENERS:
         path = shutil.which(name)
