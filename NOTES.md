@@ -227,9 +227,15 @@ python3 tools/capture_cli.py --name open-goto-short -- -g /tmp/a.txt:3
 ```
 
 它起假窗口、把 `VSCODE_IPC_HOOK_CLI` 指过去、跑一次 CLI，把报文脱敏后写进
-`fixtures/protocol.json`（`waitMarkerFilePath` → `<marker>`、家目录 → `<home>`）。
+`fixtures/protocol.json`（`waitMarkerFilePath` → `<marker>`、家目录 → `<home>`、
+`--dir` 给的录制目录 → `<dir>`）。
 `test_edit.py` 的 `ProtocolFixtureTest` / `ProbeTest` 拿它当基准，对照
 `open_request()` 与 `status` 探测。
+
+`<dir>` 是为"目录 vs 文件"这一层加的：`edit` 用 `os.path.isdir()` 判类型，快照里若
+留着本机路径（如 `/tmp/proj`），换台机器没这个目录就会被归成 `file`、与快照不符。
+`load_fixtures()` 把 `<dir>` 换成本进程自建的临时目录树（含 `proj` 子目录），
+所以 `just check` 不再依赖"跑测试的机器上恰好有什么"。
 
 抓包要真 CLI，所以**它不在测试里跑**，测试只读 fixtures。fixtures 只有一份：
 code / trae-cn / buddycn 三个产品、7 个安装版本实测发出的 JSON **逐字节相同**

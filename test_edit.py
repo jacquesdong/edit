@@ -9,6 +9,7 @@
   --list / --init；这些在进程内跑，靠 edit.PROC 指到假目录
 """
 
+import atexit
 import glob
 import importlib.util
 import json
@@ -30,6 +31,7 @@ from unittest.mock import patch
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDIT = os.path.join(HERE, 'edit.py')
 FIXTURES = os.path.join(HERE, 'fixtures', 'protocol.json')
+DIR_PLACEHOLDER = '<dir>'        # fixture 里"必须真的是目录"的路径占位（见 load_fixtures）
 
 spec = importlib.util.spec_from_file_location('edit', EDIT)
 
@@ -846,6 +848,30 @@ class FallbackTest(EditCase):
         self.assertIsNone(self.cli_args(), '不该回退到任何 CLI')
 
 
+    def test_from_opens_goto_via_socket(self):
+        """--from 从日志行刮出 file:line，直连窗口时带 gotoLineMode 打开"""
+
+        text = ('exec /home/dongjq/.local/bin/edit mvnw.cmd '
+                '[/home/dongjq/work/edit/edit.py:3201 #main]')
+        req = self.open_msg('--from', text)
+
+        self.assertEqual(req['fileURIs'],
+                         ['file:///home/dongjq/work/edit/edit.py:3201'])
+        self.assertTrue(req['gotoLineMode'])
+
+    def test_from_no_target_errors(self):
+        proc = self.run_edit('--from', 'just some text no path')
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('没从输入里认出', proc.stderr)
+
+    def test_from_rejects_extra_args(self):
+        proc = self.run_edit('--from', 'x', 'y.txt')
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn('不接受额外文件参数', proc.stderr)
+
+
 class ReplyTest(EditCase):
     """三态结局：成功 / 被拒（404、500）/ 连不上
 
@@ -1148,11 +1174,35 @@ class WorkspaceTargetTest(EditCase):
         self.assertIsNotNone(self.cli_args())
 
 
+_fixture_root = None
+
+
+def fixture_root():
+    """`<dir>` 的落地目录：整轮测试共用一个（含 proj 子目录），进程退出时清掉
+
+    edit 用 os.path.isdir() 判"目录 vs 文件"，所以快照里那条 `-a <dir>/proj`
+    要真的指向一个存在的目录，否则会被归成 file、与录制时的报文不符。
+    """
+
+    global _fixture_root
+
+    if _fixture_root is None:
+        _fixture_root = tempfile.mkdtemp(prefix='edit-fixture-')
+        os.makedirs(os.path.join(_fixture_root, 'proj'))
+        atexit.register(shutil.rmtree, _fixture_root, ignore_errors=True)
+
+    return _fixture_root
+
+
 def load_fixtures():
-    """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）"""
+    """fixtures/protocol.json：真 CLI 发出来的报文快照（tools/capture_cli.py 抓的）
+
+    录制时用的是本机真实路径（如 /tmp/proj），换台机器未必存在；`<dir>` 在加载时
+    换成 fixture_root()，让"目录还是文件"只取决于快照本身，不取决于跑测试的机器。
+    """
 
     with open(FIXTURES, encoding='utf-8') as f:
-        return json.load(f)
+        return json.loads(f.read().replace(DIR_PLACEHOLDER, fixture_root()))
 
 
 def status_body(workspace, authority='ssh-remote+7'):

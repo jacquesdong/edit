@@ -2626,7 +2626,11 @@ def ask_socket(socks, colored: bool = False):
 # 不像链接的参数照旧当文件名 —— 不改写它，也别悄悄塞进 fileURIs（那会变成
 # file:///当前目录/https:/… 这种畸形路径）。
 # 不认 localhost:8080/x（没有 scheme）：那种写全 https:// 就好。
-URI_RE = re.compile(r'^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://|mailto:|tel:)')
+
+# 链接 scheme 判据（集中一处，URI_RE / URL_RE 共用，别在各处各抄一份）
+SCHEME_RE = r'(?:[a-zA-Z][a-zA-Z0-9+.\-]*://|mailto:|tel:)'
+# 完整参数是否像链接：仅匹配 scheme 前缀（配合 ^ 做整参判定）
+URI_RE = re.compile(r'^' + SCHEME_RE)
 
 def is_uri(s: str) -> bool:
     """像个链接吗：scheme://…（或 mailto: / tel:）
@@ -2697,6 +2701,160 @@ def positional_token(a: str) -> Token:
         return ('external', a)
 
     return arg_token(a)
+
+
+# --from 用的"从文本抠路径 / 链接"正则：scheme 判据复用 SCHEME_RE（链接判据集中放）。
+# 只认"像路径 / 链接"的子串——命令名、括号、行号、#符号 等噪声不认，避免误开。
+# scheme 之后把 body 抓到空白 / 括号 / 引号为止（与 URI_RE 的区别：不锚 ^、带 body）。
+URL_RE = re.compile(SCHEME_RE + r'[^\s)\]}>"\']*')
+# --from 抠路径：可选前导 /，再 段/段/.../末段，结尾可接 :行[:列]。
+# 同一结构覆盖绝对、./ ../ 相对、带/无扩展名相对；字符集含 % @ ~ , 等真实路径字符。
+PATH_RE = re.compile(r'/?(?:[\w.\-/%$+@=,~]+/)+[\w.\-/%$+@=,~]+(?::\d+){0,2}')
+LEAD_PUNCT = re.compile(r'^[\[\(\{<]+')
+TRAIL_PUNCT = re.compile(r'[)\]}>.,;]+$')
+
+
+def clean_target(s: str) -> str:
+    """清洗一个候选：剥首尾标点；file:// 落回本地路径（与 normalize 同惯例）
+
+    >>> clean_target('[/home/dongjq/work/edit/edit.py:3201]')
+    '/home/dongjq/work/edit/edit.py:3201'
+    >>> clean_target('(/tmp/a.txt).')
+    '/tmp/a.txt'
+    >>> clean_target('file:///a/b.txt')
+    '/a/b.txt'
+    >>> clean_target('file:///a/b%20c.txt')
+    '/a/b c.txt'
+    >>> clean_target('/abs/path:3201')
+    '/abs/path:3201'
+    """
+
+    s = LEAD_PUNCT.sub('', s)
+    s = TRAIL_PUNCT.sub('', s)
+
+    if s.startswith('file:'):
+        s = file_url_to_path(s)
+
+    return s
+
+
+def extract_targets(text: str) -> list[str]:
+    """从自由文本里抠出文件路径 / 链接候选（供 --from 用）
+
+    行内常夹着命令名、括号、行号、符号（#func）等噪声：只认"像路径 / 链接"的子串，
+    再清洗首尾标点。URL 先抠出来并从原文遮掉，免得路径正则把 https://x/y:80 里的
+    :80 误当成行号。
+
+    返回的候选未排序——挑哪个交给 pick_target（带行号 > 存在 > 链接 > 其余）。
+
+    >>> extract_targets('exec /home/dongjq/.local/bin/edit mvnw.cmd '
+    ...                 '[/home/dongjq/work/edit/edit.py:3201 #main]')
+    ['/home/dongjq/.local/bin/edit', '/home/dongjq/work/edit/edit.py:3201']
+    >>> extract_targets('see https://example.com and /tmp/a.txt:5')
+    ['https://example.com', '/tmp/a.txt:5']
+    >>> extract_targets('visit https://example.com for docs')
+    ['https://example.com']
+    >>> extract_targets('no path or url here')
+    []
+    >>> extract_targets('in ./Justfile:10')          # ./ 相对：整体抠出，别被吞成 /Justfile
+    ['./Justfile:10']
+    >>> extract_targets('see ../a/b.py:5')           # ../ 多级相对也认
+    ['../a/b.py:5']
+    """
+
+    cands: list[str] = []
+
+    url_spans = []
+    for m in URL_RE.finditer(text):
+        cands.append(clean_target(m.group(0)))
+        url_spans.append(m.span())
+
+    masked = list(text)
+    for a, b in url_spans:
+        masked[a:b] = ' ' * (b - a)
+
+    for m in PATH_RE.finditer(''.join(masked)):
+        cands.append(clean_target(m.group(0)))
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+
+    return out
+
+
+def score_target(c: str) -> tuple:
+    """给候选打分（数值越大越优先），供 pick_target 选最该开的那一个
+
+    带行号的路径(4) > 存在的路径(3) > 链接(2) > 绝对但不存在(1) >
+    相对且不存在(0)；exists / absolute 只在同档内做次级排序。exists 依赖文件系统，
+    下面用 /tmp（POSIX 必存在）与确定不存在的路径区分两档。
+
+    >>> score_target('https://example.com')
+    (2, 0, 0)
+    >>> score_target('mailto:a@b.c')
+    (2, 0, 0)
+    >>> score_target('/tmp/does-not-exist.py:3201')
+    (4, False, True)
+    >>> score_target('foo/bar.py:5')
+    (4, False, False)
+    >>> score_target('/tmp')
+    (3, True, 0)
+    >>> score_target('foo/bar.py')
+    (0, 0, 0)
+    """
+
+    # 返回 (tier, tie_a, tie_b)：tier 是主优先级（4>3>2>1>0），tie_a / tie_b 是
+    # "同档内"的二级排序键，语义随档位变化——并非固定 (exist, absolute) 两列，
+    # 详见下面各分支；无同档竞争的分支用 0 占位。
+    if is_uri(c) and not c.startswith('file:'):
+        return (2, 0, 0)                  # 链接：明确有效，但排在"精确跳转"之后
+                                          #   tier=2；无同档竞争，tie 用 0 占位
+
+    base = c
+    m = re.search(r':\d+(?::\d+)?$', base)
+    has_line = bool(m)
+    if m:
+        base = base[:m.start()]
+
+    exists = os.path.exists(base)
+    absolute = os.path.isabs(base)
+
+    if has_line:
+        # 带行号：tier=4；tie_a=exists(True 更优)，tie_b=absolute(True 更优)
+        return (4, exists, absolute)
+    if exists:
+        # 存在但无行号：tier=3；exists 必为 True 不再存，tie_a=absolute 更优
+        return (3, absolute, 0)
+    if absolute:
+        # 绝对但不存在：tier=1；无同档竞争，tie 用 0 占位
+        return (1, 0, 0)
+    # 相对且不存在：tier=0；最末档
+    return (0, 0, 0)
+
+
+def pick_target(cands: list[str]) -> str | None:
+    """从候选里挑最该开的那一个
+
+    优先级（高 -> 低）：带行号的路径 > 存在的路径 > 链接 > 绝对但不存在的路径 >
+    相对且不存在的路径——核心就是"带行号优先，下来存在的优先"，链接夹在中间。
+
+    >>> pick_target(extract_targets('exec /home/dongjq/.local/bin/edit mvnw.cmd '
+    ...                 '[/home/dongjq/work/edit/edit.py:3201 #main]'))
+    '/home/dongjq/work/edit/edit.py:3201'
+    >>> pick_target(extract_targets('see https://example.com and /tmp/a.txt:5'))
+    '/tmp/a.txt:5'
+    >>> pick_target([]) is None
+    True
+    """
+
+    if not cands:
+        return None
+
+    return max(cands, key=score_target)
 
 
 class OpenExternalMsg(TypedDict):
@@ -2926,6 +3084,8 @@ def build_args():
                         choices=COLOR_CHOICES,
                         help='给窗口表和 --debug 的日志上色：不传=auto（仅终端），'
                              '省略取值=always（强制，如 | less -R），never=关闭')
+    parser.add_argument('--from', dest='scrape', nargs=1, metavar='TEXT',
+                        help='从后面的文本里抠出路径 / 链接并打开（不是把 TEXT 当文件）')
 
     flags, args = parser.parse_known_args()
 
@@ -2975,6 +3135,21 @@ def main():
     color_out, color_err = setup_logging(flags.debug, flags.color)
 
     # --prune 和打开文件无关，放在最早：它不碰 tokens，也不该被后面那些检查影响
+    if flags.scrape:
+        if flags.list or flags.init or flags.interactive or flags.prune or flags.usage:
+            sys.exit('edit --from 不和 --list / --init / --interactive / --prune / --usage 一起用')
+
+        if args:
+            sys.exit('edit --from 不接受额外文件参数')
+
+        targets = extract_targets(flags.scrape[0])
+        if not targets:
+            sys.exit('edit --from: 没从输入里认出路径/链接')
+
+        chosen = pick_target(targets)
+        assert chosen is not None              # 上面已保证 targets 非空
+        args = [chosen]
+
     if flags.prune:
         if args:
             sys.exit('edit --prune 不接受文件参数')

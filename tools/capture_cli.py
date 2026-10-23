@@ -35,6 +35,7 @@ OUT = os.path.join(HERE, os.pardir, 'fixtures', 'protocol.json')
 
 MARKER = '<marker>'          # CLI 每次现造的临时文件，路径不可重现
 HOME = '<home>'              # 本机家目录，不该进仓库
+DIR = '<dir>'                # 录制时用的目录（如 /tmp/proj）：测试机上未必存在
 
 REPLY = (b'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n'
          b'content-length: 2\r\n\r\n{}')
@@ -140,11 +141,16 @@ def capture(cli, args, timeout=6):
         return None
 
 
-def normalize(msg):
-    """脱敏：marker 换成占位符、家目录换成 <home>，否则 fixture 不可重现
+def normalize(msg, dir_root=None):
+    """脱敏：marker 换成占位符、家目录换成 <home>、录制目录换成 <dir>，否则 fixture 不可重现
+
+    dir_root 是 `--dir` 给的绝对路径。edit 用 os.path.isdir() 判"目录 vs 文件"，
+    快照里留着本机路径（如 /tmp/proj）的话，测试机上没这个目录就会归成 file。
 
     >>> normalize({'waitMarkerFilePath': '/tmp/abc123', 'fileURIs': []})
     {'waitMarkerFilePath': '<marker>', 'fileURIs': []}
+    >>> normalize({'folderURIs': ['file:///w/proj']}, '/w')['folderURIs']
+    ['file://<dir>/proj']
     """
 
     home = os.environ.get('HOME')
@@ -152,6 +158,9 @@ def normalize(msg):
     def fix(v):
         if not isinstance(v, str):
             return v
+
+        if dir_root:                        # 先换具体目录，再换家目录（目录可能在家目录下）
+            v = v.replace(dir_root, DIR)
 
         if home:
             v = v.replace(home, HOME)
@@ -210,6 +219,9 @@ def main():
     parser.add_argument('--except', dest='diff', action='append', default=[],
                         metavar='KEY=VALUE',
                         help='我们与 CLI 故意不同的字段（值是我们的取值），可多次')
+    parser.add_argument('--dir',
+                        help='录制时用的目录（如 /tmp/proj）：写进 fixture 时换成 <dir>，'
+                             '否则测试会依赖"本机恰好有这个目录"')
     parser.add_argument('--print', dest='show', action='store_true',
                         help='只打印，不写文件')
 
@@ -222,6 +234,7 @@ def main():
         sys.exit('capture: 没给 CLI 参数，例如 --name open-goto -- /tmp/a.txt:3')
 
     cli = flags.cli or default_cli()
+    dir_root = os.path.abspath(flags.dir) if flags.dir else None     # URI 里是绝对路径
     msg = capture(cli, rest, flags.timeout)
 
     if not msg:
@@ -242,11 +255,14 @@ def main():
         except ValueError:
             diff[key] = value
 
+    if dir_root:                            # 参数里的录制目录也脱敏（capture 用的是原值）
+        rest = [a.replace(dir_root, DIR) for a in rest]
+
     entry = {
         'args': rest,
         'direct': flags.direct == 'true',
         'source': source_of(cli),
-        'msg': normalize(msg),
+        'msg': normalize(msg, dir_root),
     }
 
     if diff:
